@@ -105,8 +105,15 @@ export class CameraRig {
   /** Camera-space forward/right on the ground plane — what WASD is relative to. */
   basis() {
     const s = Math.sin(this.yaw), c = Math.cos(this.yaw);
-    // Forward is where the camera looks, flattened to the XZ plane.
-    return { fx: -s, fz: -c, rx: -c, rz: s };
+    // Forward is where the camera looks, flattened to the XZ plane. Right is
+    // forward × up (three is right-handed, +Y up), which for this forward is
+    // (cos yaw, -sin yaw) — the sign that puts D and → on the screen's right.
+    // It was (-cos, +sin) for a long time, i.e. strafing was mirrored, and no
+    // probe saw it because the one test of "left click vs right click" derived
+    // its click point through this same basis and measured the result with it
+    // too, so the sign cancelled. Anything asserting a side must land in
+    // screen space; see the 「横移落在屏幕的哪一侧」 section of motion-check.
+    return { fx: -s, fz: -c, rx: c, rz: -s };
   }
 
   /**

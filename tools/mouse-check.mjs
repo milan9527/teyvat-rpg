@@ -342,11 +342,22 @@ const groundPoint = (dist = 14, lateral = 0) => p.evaluate(([d, lat]) => {
   for (const [ox, oz] of [[2, 0], [-2, 0], [0, 2], [0, -2]]) {
     relief = Math.max(relief, Math.abs(g.world.heightAt(wx + ox, wz + oz) - wy));
   }
+  // …and whether a click here is *open* ground, which the callers below all assume and none of
+  // them used to check. `_leftClick` reaches 点哪走哪 only after two interactable tests, and both
+  // are deliberately generous: a sphere test along the ray (clicking the thing is clicking the
+  // thing) and a radius test around the ground hit (clicking the grass beside a chest opens it).
+  // So ask both, through the product's own methods and the product's own ray — the ground point
+  // being clear is not enough, because the ray can clip a chest's sphere on the way to a patch of
+  // grass 12 m further on, which is exactly what it did here. Surfaced when the `basis()`
+  // right-vector sign was fixed: the same `lateral: 4` began sampling the mirrored side.
+  const rc = g._pointerRay({ ndcX: v.x, ndcY: v.y });
+  const hit = g.world.pickInteractable(rc, 90) || g.world.nearestInteractable(wx, wy, wz);
   return {
     wx, wz, wy, relief,
     x: r.left + (v.x * 0.5 + 0.5) * r.width, y: r.top + (-v.y * 0.5 + 0.5) * r.height,
     onScreen: Math.abs(v.x) < 0.85 && Math.abs(v.y) < 0.85 && v.z < 1,
     d: Math.hypot(wx - g.me.x, wz - g.me.z),
+    occupied: hit ? `${hit.type} at ${hit.x.toFixed(0)},${hit.z.toFixed(0)}` : null,
   };
 }, [dist, lateral]);
 
@@ -370,7 +381,7 @@ const findGround = async (want = 14, lateral = 0) => {
         const gp = await groundPoint(Math.max(6, want * mul), lat);
         last = gp;
         const inFrame = gp.x > 60 && gp.x < W - 60 && gp.y > 80 && gp.y < H - 120;
-        if (gp.onScreen && inFrame && gp.relief < 4 && gp.d > 5) return gp;
+        if (gp.onScreen && inFrame && gp.relief < 4 && gp.d > 5 && !gp.occupied) return gp;
       }
     }
     return null;
@@ -461,8 +472,13 @@ try {
   console.log('\n--- 左键点地面');
 
   const g1 = await findGround(14, 4);
-  check('the probe aims at real, reachable ground 14 m out', g1.onScreen && g1.relief < 3.5,
-    `${g1.d.toFixed(1)} m out, relief ${g1.relief.toFixed(1)} m, at ${Math.round(g1.x)},${Math.round(g1.y)}`);
+  // `occupied` is part of the premise, not a detail: 「点哪走哪」 below asks for a `move` order,
+  // and the product turns a click near a chest into `interact` on purpose. Say so by name here,
+  // rather than letting the next assertion report `goalKind interact` as if the product were wrong.
+  check('the probe aims at real, reachable, unoccupied ground 14 m out',
+    g1.onScreen && g1.relief < 3.5 && !g1.occupied,
+    `${g1.d.toFixed(1)} m out, relief ${g1.relief.toFixed(1)} m, at ${Math.round(g1.x)},${Math.round(g1.y)}`
+    + (g1.occupied ? `, occupied by ${g1.occupied}` : ''));
   const onGround = await elementAt(g1.x, g1.y);
   check('the point the probe clicks is the world, not a HUD element', onGround === 'canvas', `elementFromPoint → ${onGround}`);
   const s0 = await state();

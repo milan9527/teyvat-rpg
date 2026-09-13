@@ -331,6 +331,78 @@ check('a hit during a burst does not interrupt the cast', flinch.inCast === fals
 check('the damage handler is the thing that calls it',
   /this\.me\.flinch\(\)/.test(fs.readFileSync(`${SRC}/game/game.js`, 'utf8')), 'game.js damage path');
 
+/* --------------------------------------------- 3a2. 横移落在屏幕的哪一侧 -- */
+
+// `camera.js:basis()` returned (-cos, +sin) as the right vector for a long time — the negation of
+// forward × up — so D and → strafed *left*. It shipped because the only test of a side derived its
+// subject through `basis()` and then measured the result by dotting against `basis()` again, and a
+// sign that appears on both ends of a comparison cancels. So this one never mentions the basis:
+// it holds a real key and asks where the character ended up **on screen**.
+//
+// Two details it cannot do without:
+//  * The camera is snapshotted at t0 and both positions are projected through *that* clone. The
+//    live rig is a spring bolted to the character, so it re-centres them within a few tenths of a
+//    second and the live projection of a successful strafe is ~0. Freezing the viewpoint is what
+//    makes "which side" a question at all.
+//  * The key is held until the character has actually covered ground, not for a wall-clock
+//    duration: llvmpipe renders 2–6 fps here and dt is clamped to 50 ms. If they never cover it,
+//    the run SKIPs — a strafe into a rock is not evidence about a sign.
+console.log('\n=== 横移落在屏幕的哪一侧');
+const strafe = async (key, yaw) => {
+  await p.evaluate((y) => {
+    const g = window.game;
+    g.me.clearGoal?.();
+    g.rig.yaw = y;
+    // `snapToFocus`, not one `update()`: the pivot is a critically-damped spring, so a single
+    // 16 ms step after a yaw change leaves it metres behind and the character starts the run
+    // outside the frame — which is what the first version of this section SKIPped on.
+    g.rig.snapToFocus({ x: g.me.x, y: g.me.y, z: g.me.z }, 1.7);
+    g.camera.updateMatrixWorld(true);
+    window.__cam0 = g.camera.clone();
+    window.__cam0.updateMatrixWorld(true);
+    window.__p0 = { x: g.me.x, y: g.me.y, z: g.me.z };
+  }, yaw);
+  await p.keyboard.down(key);
+  let moved = 0;
+  for (let i = 0; i < 25; i++) {
+    await sleep(220);
+    moved = await p.evaluate(() => Math.hypot(window.game.me.x - window.__p0.x, window.game.me.z - window.__p0.z));
+    if (moved > 1.6) break;
+  }
+  await p.keyboard.up(key);
+  return p.evaluate(() => {
+    const g = window.game, c = window.__cam0, p0 = window.__p0;
+    const at = (x, y, z) => g.me.actor.group.position.clone().set(x, y, z).project(c);
+    const a = at(p0.x, p0.y, p0.z), b = at(g.me.x, g.me.y, g.me.z);
+    return {
+      dx: +(b.x - a.x).toFixed(3),
+      metres: +Math.hypot(g.me.x - p0.x, g.me.z - p0.z).toFixed(2),
+      onScreen: Math.abs(a.x) < 1 && Math.abs(a.y) < 1 && Math.abs(b.x) < 1.6,
+    };
+  });
+};
+// Two camera angles, because a single yaw can be right by accident: at yaw 0 the world +X axis is
+// screen right, so a basis that ignored yaw entirely would still pass there.
+for (const [label, yaw] of [['相机朝北 (yaw 0)', 0], ['相机转过 126° (yaw 2.2)', 2.2]]) {
+  const right = await strafe('KeyD', yaw);
+  const left = await strafe('KeyA', yaw);
+  const arrowR = await strafe('ArrowRight', yaw);
+  const detail = (r) => `Δscreen ${r.dx >= 0 ? '+' : ''}${r.dx} over ${r.metres} m`;
+  if (right.metres < 1.0 || left.metres < 1.0 || arrowR.metres < 1.0) {
+    skipped(`横移方向 · ${label}`,
+      `blocked here (D ${right.metres} m, A ${left.metres} m, → ${arrowR.metres} m) — no claim about a side`);
+  } else if (!right.onScreen || !left.onScreen) {
+    skipped(`横移方向 · ${label}`, 'the character left the frame, so a projected x means nothing');
+  } else {
+    check(`D 把角色移向屏幕右侧 · ${label}`, right.dx > 0.02, detail(right));
+    check(`A 把角色移向屏幕左侧 · ${label}`, left.dx < -0.02, detail(left));
+    check(`→ 与 D 同向 · ${label}`, arrowR.dx > 0.02, detail(arrowR));
+    // The both-sided half: "D went right" is also true of a basis that sends every key right.
+    check(`左右不是同一个方向 · ${label}`, right.dx > 0 && left.dx < 0,
+      `D ${right.dx} vs A ${left.dx}`);
+  }
+}
+
 /* ------------------------------------------------------------- 3b. climbing -- */
 
 // The clip that had no state at all. Driven the way a player drives it: put the character at the
