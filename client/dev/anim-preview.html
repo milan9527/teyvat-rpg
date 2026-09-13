@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>Animation preview</title>
+  <style>
+    html,body{margin:0;height:100%;background:#101018;overflow:hidden}
+    canvas{display:block;width:100vw;height:100vh}
+    #labels{position:fixed;inset:0;pointer-events:none;font:12px/1.2 sans-serif;color:#fff}
+    #labels div{position:absolute;transform:translateX(-50%);text-shadow:0 1px 3px #000}
+  </style>
+</head>
+<body>
+  <canvas id="scene"></canvas>
+  <div id="labels"></div>
+  <script type="module">
+    import * as THREE from 'three';
+    import { Renderer } from '/src/engine/renderer.js';
+    import { buildHumanoid } from '/src/gfx/humanoid.js';
+    import { Animator, CLIPS } from '/src/gfx/animator.js';
+    import { setToonTime } from '/src/gfx/toon.js';
+    import { CHARACTERS } from '@teyvat/shared/data/characters.js';
+
+    const r = new Renderer(document.getElementById('scene'), 'high');
+    const scene = r.scene;
+    scene.background = new THREE.Color(0x1b2030);
+
+    const sun = new THREE.DirectionalLight(0xfff2dd, 1.45);
+    sun.position.set(6, 12, 7);
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(2048, 2048);
+    sun.shadow.camera.left = -12; sun.shadow.camera.right = 12;
+    sun.shadow.camera.top = 12; sun.shadow.camera.bottom = -12;
+    sun.shadow.bias = -0.0008;
+    sun.shadow.normalBias = 0.02;
+    scene.add(sun);
+    scene.add(new THREE.HemisphereLight(0x9fc4ff, 0x35402f, 0.45));
+    scene.add(new THREE.AmbientLight(0x8899cc, 0.14));
+
+    const ground = new THREE.Mesh(
+      new THREE.CircleGeometry(60, 48).rotateX(-Math.PI / 2),
+      new THREE.MeshStandardMaterial({ color: 0x4a5a48, roughness: 0.95 }),
+    );
+    ground.receiveShadow = true;
+    scene.add(ground);
+
+    // ?clips=idle,walk  one character per clip, laid out in a row (default: all)
+    // ?char=lyra  which character to use   ?t=0.5  freeze one-shots at a phase
+    // ?turn=deg   ?spread=  ?dist=  ?at=   ?cols=n  grid wrap
+    const q = new URLSearchParams(location.search);
+    const charId = q.get('char') ?? 'lyra';
+    const def = CHARACTERS[charId];
+    const names = (q.get('clips')?.split(',').filter(Boolean)) ?? Object.keys(CLIPS);
+    const spread = Number(q.get('spread') ?? 1.5);
+    const cols = Number(q.get('cols') ?? names.length);
+    const freeze = q.get('t') != null ? Number(q.get('t')) : null;
+    // Simulated forward speed per clip, so distance-driven cycles actually advance.
+    const SPEED = { walk: 1.8, run: 4.2, sprint: 6.6 };
+
+    const built = [];
+    const labels = document.getElementById('labels');
+    names.forEach((name, i) => {
+      const h = buildHumanoid(def);
+      const cx = (i % cols) - (Math.min(cols, names.length) - 1) / 2;
+      const cz = Math.floor(i / cols);
+      h.group.position.set(cx * spread, 0, cz * spread * 1.6);
+      h.group.rotation.y = THREE.MathUtils.degToRad(Number(q.get('turn') ?? 0));
+      scene.add(h.group);
+      const anim = new Animator(h);
+      const cl = CLIPS[name];
+      if (cl.locomotion) anim.play(name);
+      built.push({ h, anim, name, clip: cl, x: cx * spread, z: cz * spread * 1.6, phase: i * 0.11 });
+      const el = document.createElement('div');
+      el.textContent = name;
+      labels.appendChild(el);
+      built[built.length - 1].label = el;
+    });
+
+    const rows = Math.ceil(names.length / cols);
+    const dist = Number(q.get('dist') ?? Math.max(3.2, Math.min(cols, names.length) * spread * 0.78));
+    const at = Number(q.get('at') ?? 0.95);
+    r.camera.position.set(0, at + 0.35, dist + (rows - 1) * spread * 0.9);
+    r.camera.lookAt(0, at, (rows - 1) * spread * 0.8);
+
+    let t = 0;
+    function loop() {
+      const dt = Math.min(0.05, r.clock.getDelta());
+      t += dt;
+      setToonTime(t);
+      for (const b of built) {
+        const cl = b.clip;
+        const speed = SPEED[b.name] ?? 0;
+        if (cl.locomotion) {
+          b.anim.update(dt, { speed, grounded: true, auto: false });
+        } else {
+          if (freeze != null) {
+            // Deterministic single frame for screenshotting a specific beat.
+            b.anim.overlay = b.name;
+            b.anim.overlayTime = freeze * cl.dur;
+            b.anim.overlaySpeed = 1;
+            b.anim.update(0.0001, { speed: 0, grounded: true, auto: false });
+          } else {
+            // Re-fire on a loop with a short gap so the return to idle is visible.
+            if (!b.anim.busy && t > b.phase + (b.next ?? 0)) {
+              b.anim.play(b.name);
+              b.next = (t - b.phase) + cl.dur + 0.45;
+            }
+            b.anim.update(dt, { speed: 0, grounded: true, auto: false });
+          }
+        }
+      }
+      r.render(dt);
+      const v = new THREE.Vector3();
+      for (const b of built) {
+        v.set(b.x, b.h.height + 0.3, b.z).project(r.camera);
+        b.label.style.left = `${(v.x * 0.5 + 0.5) * innerWidth}px`;
+        b.label.style.top = `${(-v.y * 0.5 + 0.5) * innerHeight}px`;
+      }
+      requestAnimationFrame(loop);
+    }
+    loop();
+
+    window.__diag = () => ({
+      clips: built.length,
+      drawCalls: r.drawCalls,
+      triangles: r.triangles,
+      fps: r.fps,
+      glErr: r.renderer.getContext().getError(),
+      programs: r.renderer.info.programs?.length,
+      actions: built.map((b) => `${b.name}:${b.anim.currentAction}`).join(' '),
+    });
+  </script>
+</body>
+</html>

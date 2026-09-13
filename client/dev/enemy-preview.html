@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>Enemy preview</title>
+  <style>
+    html,body{margin:0;height:100%;background:#101018;overflow:hidden}
+    canvas{display:block;width:100vw;height:100vh}
+    #labels{position:fixed;inset:0;pointer-events:none;font:13px/1.2 sans-serif;color:#fff}
+    #labels div{position:absolute;transform:translateX(-50%);text-shadow:0 1px 3px #000}
+  </style>
+</head>
+<body>
+  <canvas id="scene"></canvas>
+  <div id="labels"></div>
+  <script type="module">
+    import * as THREE from 'three';
+    import { Renderer } from '/src/engine/renderer.js';
+    import { buildEnemy } from '/src/gfx/enemies.js';
+    import { setToonTime } from '/src/gfx/toon.js';
+    import { ENEMIES } from '@teyvat/shared/data/enemies.js';
+
+    const r = new Renderer(document.getElementById('scene'), 'high');
+    const scene = r.scene;
+    scene.background = new THREE.Color(0x1b2030);
+
+    const sun = new THREE.DirectionalLight(0xfff2dd, 1.45);
+    sun.position.set(6, 12, 7);
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(2048, 2048);
+    sun.shadow.camera.left = -14; sun.shadow.camera.right = 14;
+    sun.shadow.camera.top = 14; sun.shadow.camera.bottom = -14;
+    sun.shadow.bias = -0.0008;
+    sun.shadow.normalBias = 0.02;
+    scene.add(sun);
+    scene.add(new THREE.HemisphereLight(0x9fc4ff, 0x35402f, 0.45));
+    scene.add(new THREE.AmbientLight(0x8899cc, 0.14));
+
+    const ground = new THREE.Mesh(
+      new THREE.CircleGeometry(60, 48).rotateX(-Math.PI / 2),
+      new THREE.MeshStandardMaterial({ color: 0x4a5a48, roughness: 0.95 }),
+    );
+    ground.receiveShadow = true;
+    scene.add(ground);
+
+    // ?only=id,id  ?turn=deg  ?spread=  ?dist=  ?at=  ?speed=  ?attack=1
+    const q = new URLSearchParams(location.search);
+    const only = q.get('only')?.split(',').filter(Boolean);
+    const ids = only?.length ? only : Object.keys(ENEMIES);
+    const spread = Number(q.get('spread') ?? 2.6);
+    const speed = Number(q.get('speed') ?? 0);
+    const attacking = q.get('attack') === '1';
+    const built = [];
+    const labels = document.getElementById('labels');
+    ids.forEach((id, i) => {
+      const e = buildEnemy(id);
+      const x = (i - (ids.length - 1) / 2) * spread;
+      e.group.position.set(x, 0, 0);
+      e.group.rotation.y = THREE.MathUtils.degToRad(Number(q.get('turn') ?? 0));
+      scene.add(e.group);
+      built.push({ e, x });
+      const el = document.createElement('div');
+      el.textContent = `${ENEMIES[id].name} ${ENEMIES[id].model.kind}`;
+      labels.appendChild(el);
+      e.label = el;
+    });
+
+    const maxH = Math.max(...built.map((b) => b.e.height));
+    const dist = Number(q.get('dist') ?? Math.max(4, ids.length * spread * 0.78, maxH * 1.9));
+    const at = Number(q.get('at') ?? maxH * 0.55);
+    r.camera.position.set(0, at + maxH * 0.15, dist);
+    r.camera.lookAt(0, at, 0);
+
+    let t = 0;
+    function loop() {
+      const dt = Math.min(0.05, r.clock.getDelta());
+      t += dt;
+      setToonTime(t);
+      for (let i = 0; i < built.length; i++) {
+        const { e } = built[i];
+        e.update(dt, t, {
+          speed,
+          // Stagger the phase so a row does not march in lockstep.
+          phase: speed > 0 ? t * (2.6 + speed) + i * 0.9 : undefined,
+          attack: attacking ? (t * 0.6 + i * 0.13) % 1 : 0,
+        });
+      }
+      r.render(dt);
+      const v = new THREE.Vector3();
+      for (const { e, x } of built) {
+        v.set(x, e.height + 0.3, 0).project(r.camera);
+        e.label.style.left = `${(v.x * 0.5 + 0.5) * innerWidth}px`;
+        e.label.style.top = `${(-v.y * 0.5 + 0.5) * innerHeight}px`;
+      }
+      requestAnimationFrame(loop);
+    }
+    loop();
+
+    window.__diag = () => ({
+      count: built.length,
+      drawCalls: r.drawCalls,
+      triangles: r.triangles,
+      fps: r.fps,
+      per: built.map(({ e }) => ({
+        id: e.def.id,
+        kind: e.def.model.kind,
+        verts: e.skinned?.geometry.attributes.position.count ?? null,
+        mats: e.skinned ? e.skinned.material.length : null,
+        bones: e.skinned?.skeleton.bones.length ?? null,
+      })),
+      glErr: r.renderer.getContext().getError(),
+      programs: r.renderer.info.programs?.length,
+    });
+  </script>
+</body>
+</html>

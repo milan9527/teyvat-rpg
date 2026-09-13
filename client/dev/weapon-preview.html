@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>Weapon preview</title>
+  <style>
+    html,body{margin:0;height:100%;background:#101018;overflow:hidden}
+    canvas{display:block;width:100vw;height:100vh}
+    #labels{position:fixed;inset:0;pointer-events:none;font:12px/1.2 sans-serif;color:#fff}
+    #labels div{position:absolute;transform:translateX(-50%);text-shadow:0 1px 3px #000}
+  </style>
+</head>
+<body>
+  <canvas id="scene"></canvas>
+  <div id="labels"></div>
+  <script type="module">
+    import * as THREE from 'three';
+    import { Renderer } from '/src/engine/renderer.js';
+    import { buildHumanoid } from '/src/gfx/humanoid.js';
+    import { Animator, CLIPS } from '/src/gfx/animator.js';
+    import { buildWeapon, attachWeapon } from '/src/gfx/weapons.js';
+    import { setToonTime } from '/src/gfx/toon.js';
+    import { CHARACTERS } from '@teyvat/shared/data/characters.js';
+    import { WEAPONS } from '@teyvat/shared/data/items.js';
+
+    // ?mode=rack   all weapons stood upright side by side (default)
+    // ?mode=held   one character per weapon, holding it, in a chosen clip
+    // ?ids=a,b     which weapons      ?char=lyra   ?clip=attack1  ?t=0.55
+    // ?turn=deg  ?spread=  ?dist=  ?at=  ?sheath=1
+    const q = new URLSearchParams(location.search);
+    const mode = q.get('mode') ?? 'rack';
+    const ids = (q.get('ids')?.split(',').filter(Boolean)) ?? Object.keys(WEAPONS);
+    const spread = Number(q.get('spread') ?? (mode === 'rack' ? 0.42 : 1.5));
+    const at = Number(q.get('at') ?? (mode === 'rack' ? 0.75 : 1.0));
+    const sheath = q.get('sheath') === '1';
+
+    const r = new Renderer(document.getElementById('scene'), 'high');
+    const scene = r.scene;
+    scene.background = new THREE.Color(0x1b2030);
+
+    const sun = new THREE.DirectionalLight(0xfff2dd, 1.5);
+    sun.position.set(6, 12, 7);
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(2048, 2048);
+    sun.shadow.camera.left = -8; sun.shadow.camera.right = 8;
+    sun.shadow.camera.top = 8; sun.shadow.camera.bottom = -8;
+    sun.shadow.bias = -0.0008;
+    sun.shadow.normalBias = 0.02;
+    scene.add(sun);
+    scene.add(new THREE.HemisphereLight(0x9fc4ff, 0x35402f, 0.5));
+    scene.add(new THREE.AmbientLight(0x8899cc, 0.16));
+
+    const ground = new THREE.Mesh(
+      new THREE.CircleGeometry(40, 48).rotateX(-Math.PI / 2),
+      new THREE.MeshStandardMaterial({ color: 0x4a5a48, roughness: 0.95 }),
+    );
+    ground.receiveShadow = true;
+    scene.add(ground);
+
+    const labels = document.getElementById('labels');
+    const items = [];
+    const mkLabel = (text) => {
+      const el = document.createElement('div');
+      el.textContent = text;
+      labels.appendChild(el);
+      return el;
+    };
+
+    if (mode === 'rack') {
+      ids.forEach((id, i) => {
+        const g = buildWeapon(id);
+        const x = (i - (ids.length - 1) / 2) * spread;
+        // Stood upright, grip near the ground, tipped back a little so both the
+        // silhouette and the front face are visible at once.
+        g.position.set(x, 0.28, 0);
+        g.rotation.set(THREE.MathUtils.degToRad(Number(q.get('turn') ?? -12)), 0.5, 0);
+        scene.add(g);
+        items.push({ obj: g, x, z: 0, top: 1.55, label: mkLabel(WEAPONS[id]?.name ?? id) });
+      });
+    } else {
+      const charId = q.get('char');
+      const clip = q.get('clip') ?? 'idle';
+      const freeze = q.get('t') != null ? Number(q.get('t')) : null;
+      // Pick a character whose weapon type matches, so the grip is judged in the
+      // pose the weapon is actually used in.
+      const byType = {};
+      for (const c of Object.values(CHARACTERS)) byType[c.weapon] ??= c.id;
+      ids.forEach((id, i) => {
+        const type = WEAPONS[id]?.type ?? id;
+        const def = CHARACTERS[charId ?? byType[type] ?? 'lyra'];
+        const h = buildHumanoid(def);
+        const x = (i - (ids.length - 1) / 2) * spread;
+        h.group.position.set(x, 0, 0);
+        h.group.rotation.y = THREE.MathUtils.degToRad(Number(q.get('turn') ?? 20));
+        scene.add(h.group);
+        const anim = new Animator(h);
+        const w = attachWeapon(h, id, { element: def.element, sheathed: sheath });
+        if (CLIPS[clip].locomotion) anim.play(clip);
+        items.push({
+          obj: h.group, anim, w, clip, freeze, x, z: 0, top: h.height + 0.28,
+          label: mkLabel(`${def.id}/${WEAPONS[id]?.name ?? id}`),
+        });
+      });
+    }
+
+    const dist = Number(q.get('dist') ?? Math.max(2.2, ids.length * spread * 0.9));
+    r.camera.position.set(0, at + 0.3, dist);
+    r.camera.lookAt(0, at, 0);
+
+    let t = 0;
+    function loop() {
+      const dt = Math.min(0.05, r.clock.getDelta());
+      t += dt;
+      setToonTime(t);
+      for (const it of items) {
+        if (it.anim) {
+          const cl = CLIPS[it.clip];
+          if (it.freeze != null && !cl.locomotion) {
+            // Deterministic single frame, for judging a grip at a specific beat.
+            it.anim.overlay = it.clip;
+            it.anim.overlayTime = it.freeze * cl.dur;
+            it.anim.overlaySpeed = 1;
+            it.anim.update(0.0001, { speed: 0, grounded: true, auto: false });
+          } else {
+            if (!cl.locomotion && !it.anim.busy && t > (it.next ?? 0)) {
+              it.anim.play(it.clip);
+              it.next = t + cl.dur + 0.4;
+            }
+            it.anim.update(dt, { speed: 0, grounded: true, auto: false });
+          }
+          it.w.update(dt, t);
+        } else {
+          it.obj.rotation.y += dt * 0.35;
+        }
+      }
+      r.render(dt);
+      const v = new THREE.Vector3();
+      for (const it of items) {
+        v.set(it.x, it.top, it.z).project(r.camera);
+        it.label.style.left = `${(v.x * 0.5 + 0.5) * innerWidth}px`;
+        it.label.style.top = `${(-v.y * 0.5 + 0.5) * innerHeight}px`;
+      }
+      requestAnimationFrame(loop);
+    }
+    loop();
+
+    window.__diag = () => ({
+      items: items.length,
+      drawCalls: r.drawCalls,
+      triangles: r.triangles,
+      fps: r.fps,
+      glErr: r.renderer.getContext().getError(),
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,47 @@
+# Supervision for the watchdog, which in turn supervises the game and the goal loop.
+#
+#   mkdir -p ~/.config/systemd/user
+#   cp tools/watchdog.service ~/.config/systemd/user/game-watchdog.service
+#   sudo loginctl enable-linger ec2-user      # the part that survives logout and reboot
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now game-watchdog
+#   systemctl --user status game-watchdog
+#
+# `enable-linger` is not optional and is the whole reason this is a systemd unit rather than
+# another `setsid nohup`. Without linger the user manager is torn down when the last login
+# session ends, which is precisely the event ("I closed the window") this is meant to
+# survive. With it, the unit is also brought back after a reboot.
+[Unit]
+Description=Teyvat game watchdog (keeps dev servers and the goal loop alive)
+# The dev servers need a network stack to bind their ports.
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ec2-user/project/game
+ExecStart=/home/ec2-user/project/game/tools/watchdog.sh
+
+# PATH, explicitly. A systemd user unit does not inherit a login shell's PATH, so
+# ~/.local/bin — where the `claude` CLI lives — is absent, and the goal loop this unit
+# starts spent 23 hours failing every iteration with `claude: command not found` while
+# reporting itself `up`. autorun.sh now prepends the directory itself; this line is the
+# other half, so anything else the watchdog launches sees the same PATH.
+Environment=PATH=/home/ec2-user/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# KillMode=process is load-bearing, not a tweak. The watchdog *starts* the client, the
+# server and the autorun loop, so under the default (control-group) every one of them lands
+# in this unit's cgroup and systemd kills them all whenever the unit is stopped or
+# restarted. A watchdog whose own restart takes down everything it was watching is worse
+# than no watchdog: `systemctl --user restart game-watchdog` would have killed the running
+# goal loop mid-edit. With `process`, only the watchdog itself is signalled and the
+# detached session leaders it launched are left alone — they have their own pid files and
+# their own liveness checks, which is how they get recovered on the next pass anyway.
+KillMode=process
+
+# Restart=always, because the failure this exists to prevent is silent death. RestartSec is
+# long enough that a watchdog crash-looping on a broken repo cannot spin the box.
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=default.target

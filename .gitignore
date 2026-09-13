@@ -1,0 +1,21 @@
+# Dependencies and build output
+node_modules/
+client/dist/
+
+# Local daemon bookkeeping (pids + logs written by tools/daemon.sh)
+.run/
+
+# Deployment state: AWS resource ids for one specific account, written by deploy/deploy.sh.
+# Not a credential (the secrets themselves live in Secrets Manager), but it describes one
+# person's infrastructure and has no business in a public repo.
+deploy/.aws-state
+
+# Per-machine editor/agent settings
+.claude/settings.local.json
+
+# Probe and server logs
+*.log
+
+# Machine-local symlink to a puppeteer install in /tmp (see README: the probes resolve
+# `puppeteer` through it). An absolute symlink is meaningless in a clone.
+tools/node_modules

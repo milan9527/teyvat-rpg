@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>Prop preview</title>
+  <style>
+    html,body{margin:0;height:100%;background:#101018;overflow:hidden}
+    canvas{display:block;width:100vw;height:100vh}
+    #labels{position:fixed;inset:0;pointer-events:none;font:13px/1.2 sans-serif;color:#fff}
+    #labels div{position:absolute;transform:translateX(-50%);text-shadow:0 1px 3px #000}
+  </style>
+</head>
+<body>
+  <canvas id="scene"></canvas>
+  <div id="labels"></div>
+  <script type="module">
+    import * as THREE from 'three';
+    import { Renderer } from '/src/engine/renderer.js';
+    import {
+      buildPropField, buildProp, SCATTER_KINDS, SINGLE_KINDS,
+    } from '/src/gfx/props.js';
+    import { setToonTime } from '/src/gfx/toon.js';
+
+    // ?only=oak,rock  ?spread=  ?dist=  ?at=  ?turn=deg  ?each=n  ?snowy=1
+    // ?color=0x8fe3f0  ?tier=  ?element=  ?open=1  ?lit=1  ?field=n
+    const q = new URLSearchParams(location.search);
+    const num = (k, d) => (q.get(k) == null ? d : Number(q.get(k)));
+
+    const r = new Renderer(document.getElementById('scene'), 'high');
+    const scene = r.scene;
+    scene.background = new THREE.Color(0x1b2030);
+    scene.fog = new THREE.Fog(0x1b2030, 40, 160);
+
+    const sun = new THREE.DirectionalLight(0xfff2dd, 1.45);
+    sun.position.set(8, 16, 9);
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(2048, 2048);
+    sun.shadow.camera.left = -30; sun.shadow.camera.right = 30;
+    sun.shadow.camera.top = 30; sun.shadow.camera.bottom = -30;
+    sun.shadow.camera.far = 80;
+    sun.shadow.bias = -0.0008;
+    sun.shadow.normalBias = 0.02;
+    scene.add(sun);
+    scene.add(new THREE.HemisphereLight(0x9fc4ff, 0x3d4a33, 0.5));
+    scene.add(new THREE.AmbientLight(0x8899cc, 0.14));
+
+    const ground = new THREE.Mesh(
+      new THREE.CircleGeometry(120, 64).rotateX(-Math.PI / 2),
+      new THREE.MeshStandardMaterial({ color: 0x4a5a48, roughness: 0.95 }),
+    );
+    ground.receiveShadow = true;
+    scene.add(ground);
+
+    const only = q.get('only')?.split(',').filter(Boolean);
+    const ids = only?.length ? only : [...SCATTER_KINDS, ...SINGLE_KINDS];
+    const each = Math.max(1, num('each', 1));      // instances per kind, in a clump
+    const opts = {};
+    if (q.get('snowy') === '1') opts.snowy = true;
+    if (q.get('dry') === '1') opts.dry = true;
+    if (q.get('color')) opts.color = Number(q.get('color'));
+    if (q.get('tier')) opts.tier = q.get('tier');
+    if (q.get('element')) opts.element = q.get('element');
+
+    const built = [];
+    const labels = document.getElementById('labels');
+    let x = 0;
+    const gap = num('spread', 0);
+
+    ids.forEach((kind, i) => {
+      let entry;
+      if (SINGLE_KINDS.includes(kind) && each === 1) {
+        entry = buildProp(kind, opts);
+        entry.group.position.x = 0;
+        scene.add(entry.group);
+        entry.instances = 1;
+      } else {
+        // Clump `each` instances of one kind in a small ring, so instancing,
+        // per-instance yaw/scale and the shared outline shell are all exercised.
+        const placements = [];
+        for (let k = 0; k < each; k++) {
+          const a = (k / each) * Math.PI * 2;
+          const rad = each === 1 ? 0 : Math.sqrt(each) * 0.55;
+          placements.push({
+            x: Math.cos(a) * rad, y: 0, z: Math.sin(a) * rad,
+            rot: a * 1.7, scale: 0.85 + ((k * 37) % 10) / 30,
+            tilt: [((k * 13) % 7 - 3) * 0.012, ((k * 29) % 7 - 3) * 0.012],
+          });
+        }
+        entry = buildPropField(kind, placements, {
+          ...opts,
+          variants: Math.min(3, each),
+          seed: 1 + i * 17,
+          outline: !['grassTuft', 'sweetFlower', 'windwheelAster', 'qingxin', 'mint']
+            .includes(kind),
+        });
+        scene.add(entry.group);
+      }
+      entry.kindName = kind;
+      built.push(entry);
+    });
+
+    // Lay the kinds out left to right, spacing each by its own footprint.
+    let cursor = 0;
+    const widths = built.map((b) => Math.max(1.2, b.radius * 2 * (each > 1 ? Math.sqrt(each) * 0.9 : 1)));
+    const total = widths.reduce((a, b) => a + b + gap, 0);
+    cursor = -total / 2;
+    built.forEach((b, i) => {
+      const w = widths[i];
+      const px = cursor + w / 2;
+      cursor += w + gap;
+      b.group.position.x += px;
+      b.px = px;
+      const el = document.createElement('div');
+      el.textContent = `${b.kindName}${b.instances > 1 ? ` ×${b.instances}` : ''}`;
+      labels.appendChild(el);
+      b.label = el;
+    });
+
+    if (q.get('open') === '1') built.forEach((b) => b.open?.());
+    if (q.get('lit') === '1') built.forEach((b) => b.setLit?.(true));
+
+    const maxH = Math.max(...built.map((b) => b.height ?? 1));
+    // The renderer's fov makes the visible width ≈ 0.95 × distance, so fitting a row
+    // of `total` metres needs rather more distance than a naive half-total guess.
+    const dist = num('dist', Math.max(4, total * 1.12, maxH * 1.9));
+    const at = num('at', maxH * 0.45);
+    r.camera.position.set(0, at + maxH * 0.22, dist);
+    r.camera.lookAt(0, at, 0);
+    r.camera.rotation.z = 0;
+    if (q.get('turn')) {
+      const a = THREE.MathUtils.degToRad(Number(q.get('turn')));
+      r.camera.position.set(Math.sin(a) * dist, at + maxH * 0.22, Math.cos(a) * dist);
+      r.camera.lookAt(0, at, 0);
+    }
+
+    let t = 0;
+    function loop() {
+      const dt = Math.min(0.05, r.clock.getDelta());
+      t += dt;
+      setToonTime(t);
+      for (const b of built) b.update?.(dt, t);
+      r.render(dt);
+      const v = new THREE.Vector3();
+      for (const b of built) {
+        v.set(b.px, (b.height ?? 1) + 0.35, 0).project(r.camera);
+        b.label.style.left = `${(v.x * 0.5 + 0.5) * innerWidth}px`;
+        b.label.style.top = `${(-v.y * 0.5 + 0.5) * innerHeight}px`;
+      }
+      requestAnimationFrame(loop);
+    }
+    loop();
+
+    window.__diag = () => ({
+      kinds: built.length,
+      drawCalls: r.drawCalls,
+      triangles: r.triangles,
+      fps: r.fps,
+      per: built.map((b) => ({
+        kind: b.kindName,
+        instances: b.instances ?? 1,
+        meshes: b.meshes?.length ?? b.group.children.length,
+        height: +(b.height ?? 0).toFixed(2),
+        radius: +(b.radius ?? 0).toFixed(2),
+        tris: (b.meshes ?? []).reduce(
+          (s, m) => s + (m.geometry.index ? m.geometry.index.count : m.geometry.attributes.position.count) / 3 * m.count, 0) || null,
+      })),
+      glErr: r.renderer.getContext().getError(),
+      programs: r.renderer.info.programs?.length,
+    });
+  </script>
+</body>
+</html>

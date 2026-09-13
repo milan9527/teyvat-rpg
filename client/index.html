@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>提瓦特之境 · Teyvat Online</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="stylesheet" href="/src/ui/style.css" />
+</head>
+<body>
+  <div id="app">
+    <canvas id="scene"></canvas>
+
+    <!-- 3D-overlaid world markers (damage numbers, nameplates) -->
+    <div id="world-overlay"></div>
+
+    <!-- HUD + menus are mounted here -->
+    <div id="ui-root"></div>
+
+    <!-- boot / loading -->
+    <div id="boot">
+      <div class="boot-bg"></div>
+      <div class="boot-inner">
+        <h1 class="game-title">提瓦特之境</h1>
+        <p class="game-sub">TEYVAT ONLINE</p>
+        <div class="boot-bar"><div class="boot-fill" id="boot-fill"></div></div>
+        <p class="boot-msg" id="boot-msg">正在初始化…</p>
+      </div>
+    </div>
+  </div>
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>

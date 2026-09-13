@@ -1,0 +1,3014 @@
+/* ==========================================================================
+   提瓦特之境 — UI stylesheet
+   --------------------------------------------------------------------------
+   One file, no framework. Everything is driven from the custom properties in
+   :root so the whole HUD can be retinted (and scaled for a small window) from
+   one place.
+
+   Layout rule that shapes the rest of this file: #ui-root is a full-screen
+   pointer-events:none layer stacked over the canvas, and every *interactive*
+   descendant switches pointer-events back on. That way the HUD never eats a
+   click meant for the world — click-to-move has to keep working underneath the
+   health bars and the minimap.
+   ========================================================================== */
+
+:root {
+  /* Genshin's UI is warm parchment over deep blue-grey, not neutral grey. */
+  --paper: #f2ead6;
+  --paper-dim: #d9cfb6;
+  --ink: #3b4256;
+  --ink-soft: #5c6478;
+  --panel: rgba(38, 44, 62, 0.90);
+  --panel-solid: #2a3046;
+  --panel-edge: rgba(226, 210, 168, 0.34);
+  --gold: #e8c56a;
+  --gold-deep: #b9913c;
+  --accent: #6fd6e0;
+
+  --hp: #7fd46a;
+  --hp-low: #e05e4e;
+  --energy: #f0d878;
+  --stamina: #e8f0c0;
+  --shield-gold: #d8c890;
+  --shield-gold-dark: #9c8a52;
+  /* The element a shield is made of overrides these two per party card (`hud.js` sets them on
+     the card root), because 结晶 hands out a shield of whatever element the geo hit reacted with
+     and that decides how much of the next hit it eats. Unset, both fall back to the old gold. */
+  --shield: var(--shield-gold);
+  --shield-dark: var(--shield-gold-dark);
+  --cold: #9fd8f0;
+
+  --wind: #6fd6a5;
+  --fire: #ff7a4d;
+  --water: #56b0f0;
+  --ice: #93dff0;
+  --lightning: #b586f0;
+  --earth: #e0b451;
+  --light: #ffe9a8;
+
+  --radius: 6px;
+  --shadow: 0 6px 22px rgba(0, 0, 0, 0.45);
+  /* The halo for text that floats directly on the 3D scene with no panel behind it, which is most
+     of the HUD. Two layers, and the tight one is the one that matters: `tools/legible-check.mjs`
+     grades every floating line's WCAG contrast against the pixels immediately around its strokes,
+     and a single `0 1px 4px rgba(0,0,0,.8)` — what all of these rules used to carry — still leaves
+     the pixel *beside* a stroke at some 80 % of a sunlit meadow. The 2 px layer at .9 buys the
+     glyph its own dark ground; the 5 px layer keeps the edge soft so the HUD does not look
+     stencilled. Do not put this on panel text: a panel already is the contrast. */
+  --ink-halo: 0 0 2px rgba(0, 0, 0, 0.9), 0 1px 5px rgba(0, 0, 0, 0.85);
+  --font: 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei',
+          system-ui, sans-serif;
+  --font-num: 'Rajdhani', 'DIN Alternate', 'Segoe UI', sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #0b0d14;
+  color: var(--paper);
+  font-family: var(--font);
+  font-size: 15px;
+  /* Dragging the mouse to orbit the camera must not select HUD text. */
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+}
+
+canvas#scene {
+  display: block;
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  /* The world is the click target; anything above it opts back in. */
+  touch-action: none;
+}
+
+#world-overlay,
+#ui-root {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+#world-overlay { z-index: 10; }
+#ui-root { z-index: 20; }
+
+/* Anything that should be clickable inside the HUD. */
+.click,
+button,
+input,
+select,
+textarea,
+.panel,
+.slot,
+.tab,
+.list-row { pointer-events: auto; }
+
+/* =========================================================== scrollbars == */
+
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-track { background: rgba(0, 0, 0, 0.22); }
+::-webkit-scrollbar-thumb {
+  background: rgba(226, 210, 168, 0.28);
+  border-radius: 5px;
+}
+::-webkit-scrollbar-thumb:hover { background: rgba(226, 210, 168, 0.46); }
+
+/* ============================================================== boot ===== */
+
+#boot {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: auto;
+  transition: opacity 0.75s ease;
+}
+
+#boot.hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.boot-bg {
+  position: absolute;
+  inset: 0;
+  /* A painted sky rather than a flat fill: three radial washes (dawn sun,
+     upper atmosphere, ground haze) over a vertical gradient. Cheap, and it
+     stops the loading screen looking like a browser error page. */
+  background:
+    radial-gradient(ellipse 70% 42% at 62% 78%, rgba(232, 197, 106, 0.20), transparent 70%),
+    radial-gradient(ellipse 90% 55% at 20% 12%, rgba(111, 214, 224, 0.14), transparent 72%),
+    linear-gradient(178deg, #101a30 0%, #182742 38%, #24374f 66%, #3c4a52 100%);
+}
+
+/* Slow drifting star/dust field, built from repeating-conic gradients so it
+   needs no image asset. */
+.boot-bg::after {
+  content: '';
+  position: absolute;
+  inset: -20%;
+  opacity: 0.30;
+  background-image:
+    radial-gradient(1.5px 1.5px at 20% 30%, #fff 50%, transparent 51%),
+    radial-gradient(1.2px 1.2px at 70% 18%, #cfe6ff 50%, transparent 51%),
+    radial-gradient(1.8px 1.8px at 42% 62%, #fff2d0 50%, transparent 51%),
+    radial-gradient(1.1px 1.1px at 84% 52%, #fff 50%, transparent 51%),
+    radial-gradient(1.4px 1.4px at 12% 78%, #d8f0ff 50%, transparent 51%);
+  background-size: 340px 340px, 260px 260px, 420px 420px, 300px 300px, 380px 380px;
+  animation: bootDrift 90s linear infinite;
+}
+
+@keyframes bootDrift {
+  from { transform: translate3d(0, 0, 0); }
+  to { transform: translate3d(-340px, -180px, 0); }
+}
+
+.boot-inner {
+  position: relative;
+  text-align: center;
+  padding: 0 28px;
+  max-width: 640px;
+}
+
+h1.game-title {
+  margin: 0;
+  font-size: clamp(38px, 7.4vw, 74px);
+  font-weight: 300;
+  letter-spacing: 0.34em;
+  /* Indent by one tracking step so the letter-spacing on the final glyph does
+     not push the whole line visually left of centre. */
+  text-indent: 0.34em;
+  color: var(--paper);
+  text-shadow:
+    0 0 34px rgba(232, 197, 106, 0.42),
+    0 2px 14px rgba(0, 0, 0, 0.55);
+  animation: titleIn 1.6s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+p.game-sub {
+  margin: 14px 0 46px;
+  font-family: var(--font-num);
+  font-size: clamp(11px, 1.6vw, 15px);
+  font-weight: 400;
+  letter-spacing: 0.62em;
+  text-indent: 0.62em;
+  color: rgba(232, 197, 106, 0.82);
+  animation: titleIn 1.6s 0.25s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes titleIn {
+  from { opacity: 0; transform: translateY(16px); filter: blur(6px); }
+  to { opacity: 1; transform: none; filter: none; }
+}
+
+.boot-bar {
+  position: relative;
+  height: 3px;
+  width: min(420px, 74vw);
+  margin: 0 auto;
+  background: rgba(255, 255, 255, 0.14);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+#boot-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 0%;
+  background: linear-gradient(90deg, var(--gold-deep), var(--gold), #fff6d8);
+  box-shadow: 0 0 12px rgba(232, 197, 106, 0.75);
+  transition: width 0.32s ease-out;
+}
+
+#boot-msg {
+  margin-top: 18px;
+  font-size: 13px;
+  letter-spacing: 0.16em;
+  color: rgba(242, 234, 214, 0.66);
+  min-height: 1.3em;
+}
+
+#boot-msg.error {
+  color: #ff9a86;
+  letter-spacing: 0.04em;
+}
+
+.boot-tip {
+  margin-top: 40px;
+  font-size: 12px;
+  line-height: 1.9;
+  color: rgba(242, 234, 214, 0.40);
+  letter-spacing: 0.08em;
+}
+
+.boot-tip kbd {
+  display: inline-block;
+  min-width: 1.5em;
+  padding: 1px 5px;
+  margin: 0 2px;
+  border: 1px solid rgba(242, 234, 214, 0.30);
+  border-bottom-width: 2px;
+  border-radius: 3px;
+  font-family: var(--font-num);
+  font-size: 11px;
+  color: rgba(242, 234, 214, 0.72);
+}
+
+/* ============================================================= login ===== */
+
+.login {
+  position: absolute;
+  left: 50%;
+  bottom: 8vh;
+  transform: translateX(-50%);
+  width: min(360px, 84vw);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  animation: titleIn 0.9s 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.login .row {
+  display: flex;
+  gap: 8px;
+}
+
+.login .row > * { flex: 1; }
+
+.btn {
+  pointer-events: auto;
+  appearance: none;
+  border: 1px solid var(--panel-edge);
+  border-radius: var(--radius);
+  background: rgba(20, 26, 40, 0.72);
+  color: var(--paper);
+  font-family: var(--font);
+  font-size: 14px;
+  letter-spacing: 0.12em;
+  padding: 11px 18px;
+  cursor: pointer;
+  transition: background 0.16s, border-color 0.16s, transform 0.08s;
+  backdrop-filter: blur(4px);
+}
+
+.btn:hover:not(:disabled) {
+  background: rgba(52, 62, 88, 0.88);
+  border-color: var(--gold);
+}
+
+.btn:active:not(:disabled) { transform: translateY(1px); }
+
+.btn:disabled {
+  opacity: 0.42;
+  cursor: default;
+}
+
+.btn.primary {
+  background: linear-gradient(180deg, rgba(232, 197, 106, 0.94), rgba(185, 145, 60, 0.94));
+  border-color: rgba(255, 246, 216, 0.6);
+  color: #2a2415;
+  font-weight: 600;
+}
+
+.btn.primary:hover:not(:disabled) {
+  background: linear-gradient(180deg, #fff0c0, var(--gold));
+}
+
+.btn.ghost {
+  background: transparent;
+  color: rgba(242, 234, 214, 0.66);
+  font-size: 13px;
+  padding: 8px 12px;
+}
+
+.btn.small { padding: 6px 11px; font-size: 12.5px; letter-spacing: 0.06em; }
+
+.field {
+  pointer-events: auto;
+  width: 100%;
+  border: 1px solid var(--panel-edge);
+  border-radius: var(--radius);
+  background: rgba(12, 16, 26, 0.66);
+  color: var(--paper);
+  font-family: var(--font);
+  font-size: 14px;
+  padding: 11px 13px;
+  outline: none;
+  transition: border-color 0.16s, background 0.16s;
+}
+
+.field::placeholder { color: rgba(242, 234, 214, 0.34); }
+.field:focus {
+  border-color: var(--gold);
+  background: rgba(12, 16, 26, 0.86);
+}
+
+.login-msg {
+  min-height: 1.2em;
+  font-size: 12.5px;
+  text-align: center;
+  color: #ff9a86;
+  letter-spacing: 0.04em;
+}
+
+/* ============================================================== HUD ====== */
+
+.hud-tl {
+  position: absolute;
+  top: 16px;
+  left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* -- party roster (left column of character cards) ----------------------- */
+
+.party {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.pcard {
+  pointer-events: auto;
+  position: relative;
+  width: 190px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 6px 10px 6px 6px;
+  background: linear-gradient(90deg, rgba(30, 36, 52, 0.86), rgba(30, 36, 52, 0.44));
+  border: 1px solid rgba(226, 210, 168, 0.16);
+  border-left: 3px solid var(--el, var(--gold));
+  border-radius: 4px 22px 22px 4px;
+  cursor: pointer;
+  transition: transform 0.14s cubic-bezier(0.16, 1, 0.3, 1), background 0.14s, border-color 0.14s;
+}
+
+.pcard:hover { transform: translateX(4px); }
+
+.pcard.active {
+  background: linear-gradient(90deg, rgba(58, 68, 96, 0.94), rgba(44, 52, 74, 0.62));
+  border-color: var(--gold);
+  transform: translateX(8px);
+}
+
+.pcard.dead {
+  filter: grayscale(0.85) brightness(0.62);
+}
+
+.pcard .av {
+  position: relative;
+  flex: 0 0 38px;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 38% 30%, #fff6, transparent 62%), var(--el, #666);
+  border: 2px solid rgba(255, 255, 255, 0.34);
+  display: grid;
+  place-items: center;
+  font-size: 16px;
+  font-weight: 600;
+  color: #1c2030;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.28);
+}
+
+/*
+ * 元素战技冷却, on the *off-field* portraits.
+ *
+ * Which character to switch to is a question about their skill, and the answer used to be
+ * unavailable: only the character on the field had a cooldown ring, and the client did not even
+ * know the others' (nothing on the wire carried it — see `Player.cooldownMap`). The veil is a
+ * conic wipe that empties clockwise, with the seconds left over it, so a glance at the party
+ * column says which 触发 is ready.
+ */
+.pcard .av .cd {
+  position: absolute;
+  inset: -2px;
+  border-radius: 50%;
+  display: none;
+  place-items: center;
+  font-family: var(--font-num);
+  font-size: 12px;
+  line-height: 1;
+  color: rgba(255, 255, 255, 0.94);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.85);
+  background: conic-gradient(rgba(9, 12, 20, 0.68) calc(var(--cd, 0) * 360deg), transparent 0);
+}
+
+.pcard.cooling .av .cd {
+  display: grid;
+}
+
+/*
+ * 元素附着 on the character on the field: a coloured bead on the portrait's shoulder, carrying
+ * the element's own glyph. `display: none` until something is attached — an always-visible slot
+ * would read as "nothing attached" in exactly the way the missing indicator already did.
+ */
+.pcard .av .aura {
+  display: none;
+  position: absolute;
+  top: -3px;
+  right: -5px;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  font-style: normal;
+  font-size: 9px;
+  line-height: 15px;
+  text-align: center;
+  color: #0d1018;
+  background: var(--au, #fff);
+  border: 1px solid rgba(12, 16, 24, 0.7);
+  box-shadow: 0 0 7px var(--au, #fff);
+}
+
+.pcard .av .aura.on {
+  display: block;
+}
+
+.pcard .av .lv {
+  position: absolute;
+  bottom: -6px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-family: var(--font-num);
+  font-size: 10px;
+  line-height: 1;
+  padding: 1px 4px;
+  border-radius: 6px;
+  background: rgba(14, 18, 28, 0.92);
+  color: var(--paper);
+  text-shadow: none;
+  letter-spacing: 0.02em;
+}
+
+.pcard .info {
+  flex: 1;
+  min-width: 0;
+}
+
+.pcard .nm {
+  font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: rgba(242, 234, 214, 0.92);
+  margin-bottom: 3px;
+}
+
+.pcard .key {
+  position: absolute;
+  right: 7px;
+  top: 4px;
+  font-family: var(--font-num);
+  font-size: 10px;
+  color: rgba(242, 234, 214, 0.42);
+}
+
+.bar {
+  position: relative;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(0, 0, 0, 0.48);
+  overflow: hidden;
+}
+
+.bar > i {
+  position: absolute;
+  inset: 0 auto 0 0;
+  display: block;
+  width: 0;
+  border-radius: 2px;
+  transition: width 0.2s ease-out;
+}
+
+.bar.hp > i { background: linear-gradient(90deg, #4f9c3c, var(--hp)); }
+.bar.hp.low > i { background: linear-gradient(90deg, #a3352a, var(--hp-low)); }
+.bar.hp > i.shield { background: linear-gradient(90deg, var(--shield-dark), var(--shield)); }
+.bar.en { height: 3px; margin-top: 3px; }
+.bar.en > i { background: linear-gradient(90deg, #b09a3c, var(--energy)); }
+
+/* -- top-left player line ------------------------------------------------ */
+
+.hud-player {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: rgba(242, 234, 214, 0.86);
+  text-shadow: var(--ink-halo);
+}
+
+.hud-player .ar {
+  font-family: var(--font-num);
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 9px;
+  background: rgba(232, 197, 106, 0.20);
+  border: 1px solid rgba(232, 197, 106, 0.44);
+  color: var(--gold);
+  letter-spacing: 0.06em;
+}
+
+/* -- top-right: currency, minimap, clock -------------------------------- */
+
+.hud-tr {
+  position: absolute;
+  top: 14px;
+  right: 18px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 9px;
+}
+
+.currency {
+  display: flex;
+  gap: 12px;
+  font-family: var(--font-num);
+  font-size: 13.5px;
+  color: rgba(242, 234, 214, 0.92);
+  text-shadow: var(--ink-halo);
+}
+
+.currency span {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.currency b {
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+
+.cur-ico {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  display: inline-block;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.3);
+}
+
+.cur-ico.mora { background: radial-gradient(circle at 34% 30%, #fff8d0, #c99a2c); }
+.cur-ico.gem {
+  background: radial-gradient(circle at 34% 30%, #dff6ff, #4f8fd0);
+  border-radius: 3px;
+  transform: rotate(45deg);
+  width: 12px;
+  height: 12px;
+}
+.cur-ico.resin { background: radial-gradient(circle at 34% 30%, #d8c0ff, #7a4fd0); }
+.cur-ico.ticket {
+  background: linear-gradient(160deg, #f0e6ff, #9a6fd8);
+  border-radius: 2px;
+  width: 11px;
+  height: 15px;
+}
+
+/* -- minimap ------------------------------------------------------------- */
+
+.minimap-wrap {
+  pointer-events: auto;
+  position: relative;
+  width: 148px;
+  height: 148px;
+  cursor: pointer;
+}
+
+.minimap-wrap canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  border: 2px solid rgba(226, 210, 168, 0.42);
+  box-shadow: var(--shadow), inset 0 0 24px rgba(0, 0, 0, 0.55);
+  background: rgba(16, 20, 32, 0.72);
+}
+
+.minimap-wrap .compass {
+  position: absolute;
+  top: -3px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-family: var(--font-num);
+  font-size: 11px;
+  color: var(--gold);
+  text-shadow: 0 1px 3px #000;
+}
+
+.zone-name {
+  font-size: 12.5px;
+  letter-spacing: 0.14em;
+  color: rgba(242, 234, 214, 0.72);
+  text-shadow: var(--ink-halo);
+  text-align: right;
+}
+
+.zone-name b {
+  display: block;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--paper);
+  letter-spacing: 0.08em;
+}
+
+/* -- world clock -------------------------------------------------------- */
+
+.worldclock {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 5px;
+  font-size: 12px;
+  letter-spacing: 0.10em;
+  color: rgba(242, 234, 214, 0.66);
+  text-shadow: var(--ink-halo);
+}
+
+.worldclock b {
+  font-size: 15px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;   /* the colon must not walk left and right every minute */
+  color: var(--paper);
+  letter-spacing: 0.06em;
+}
+
+.worldclock em {
+  font-style: normal;
+  font-size: 10.5px;
+  padding: 1px 5px;
+  border-radius: 8px;
+  color: rgba(255, 236, 190, 0.9);
+  background: rgba(120, 92, 40, 0.42);
+  border: 1px solid rgba(255, 214, 140, 0.28);
+}
+
+.worldclock.pinned b { color: #ffd98a; }
+
+/* The dial's colour, opacity and glow are written from the phase in `hud.setClock`; the shape is
+   here. `.moon` bites a crescent out of it with a pseudo-element rather than swapping a glyph, so
+   day → night is one continuous element and cannot flicker between two icons — and, importantly,
+   the crescent does not live in `box-shadow`, which the inline glow would overwrite.
+   There is deliberately no CSS transition on the colour. There was a 420 ms one, and under Xvfb
+   Firefox advances a transition only when it paints: `daylight-check` read the dial 900 ms after
+   pinning an hour and got the colour of the *previous* pin, twice. The phase itself only changes
+   every six in-game minutes in steps of about a percent, so stepping with it is smooth enough and
+   a probe reading this element gets the value that was written. */
+.wc-dial {
+  position: relative;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background: #fff2d8;
+}
+
+.wc-dial.moon::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  box-shadow: inset -3.5px 0 0 rgba(6, 9, 20, 0.92);
+}
+
+/* 天气 chip, inside the clock widget. Same reason the dial has no transition: `weather-check`
+   reads this element a few hundred ms after pinning a day and an hour, and under Xvfb a transition
+   would hand it the *previous* state. Intensity is written inline as opacity in `hud.setWeather`;
+   the colour comes from a class, because rain and snow are two words that should not be the same
+   colour when both can appear over the same green valley. */
+.wc-sky {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  letter-spacing: 0.08em;
+  color: rgba(226, 240, 255, 0.94);
+  background: rgba(38, 58, 88, 0.5);
+  border: 1px solid rgba(150, 190, 240, 0.3);
+}
+
+.wc-sky.wet {
+  color: #cfe4ff;
+  background: rgba(30, 62, 104, 0.56);
+  border-color: rgba(130, 186, 255, 0.42);
+}
+
+.wc-sky.snowy {
+  color: #f2f8ff;
+  background: rgba(66, 84, 110, 0.5);
+  border-color: rgba(216, 236, 255, 0.44);
+}
+
+/* -- net / cold / status strip ------------------------------------------ */
+
+.hud-status {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 5px;
+  font-family: var(--font-num);
+  font-size: 11.5px;
+  color: rgba(242, 234, 214, 0.6);
+  text-shadow: var(--ink-halo);
+}
+
+.ping-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  margin-right: 5px;
+  background: var(--hp);
+  box-shadow: 0 0 6px currentColor;
+}
+
+.ping-dot.mid { background: var(--energy); }
+.ping-dot.bad { background: var(--hp-low); }
+.ping-dot.off { background: #777; box-shadow: none; }
+
+.cold-meter {
+  width: 116px;
+  height: 6px;
+  border-radius: 3px;
+  border: 1px solid rgba(159, 216, 240, 0.5);
+  background: rgba(0, 0, 0, 0.42);
+  overflow: hidden;
+}
+
+.cold-meter > i {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: linear-gradient(90deg, #6fa8d0, var(--cold), #fff);
+  transition: width 0.25s linear;
+}
+
+/* =========================================== bottom-right action bar ===== */
+
+.hud-br {
+  position: absolute;
+  right: 22px;
+  bottom: 22px;
+  display: flex;
+  align-items: flex-end;
+  gap: 14px;
+}
+
+.skills {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+}
+
+.skill {
+  pointer-events: auto;
+  position: relative;
+  width: 62px;
+  height: 62px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 36% 28%, rgba(255, 255, 255, 0.20), transparent 62%),
+              rgba(24, 30, 46, 0.82);
+  border: 2px solid rgba(226, 210, 168, 0.34);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition: transform 0.12s, border-color 0.14s, box-shadow 0.16s;
+  overflow: hidden;
+}
+
+.skill.burst {
+  width: 82px;
+  height: 82px;
+}
+
+.skill:hover { transform: translateY(-3px); border-color: var(--gold); }
+
+.skill .glyph {
+  font-size: 22px;
+  color: rgba(242, 234, 214, 0.9);
+  text-shadow: 0 0 10px var(--el, #fff);
+  pointer-events: none;
+}
+
+.skill.burst .glyph { font-size: 30px; }
+
+.skill .kb {
+  position: absolute;
+  bottom: 3px;
+  right: 6px;
+  font-family: var(--font-num);
+  font-size: 10px;
+  color: rgba(242, 234, 214, 0.55);
+  pointer-events: none;
+}
+
+/* Radial cooldown wipe. `--cd` runs 0 → 1; conic-gradient turns that into a
+   sweeping shade, which is exactly the Genshin cooldown read. */
+.skill .cd {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: conic-gradient(rgba(6, 8, 14, 0.80) calc(var(--cd, 0) * 360deg),
+                             transparent 0);
+  pointer-events: none;
+}
+
+.skill .cdnum {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-family: var(--font-num);
+  font-size: 17px;
+  color: #fff;
+  text-shadow: 0 1px 5px #000;
+  pointer-events: none;
+}
+
+.skill.ready {
+  border-color: var(--el, var(--gold));
+  box-shadow: 0 0 16px -2px var(--el, var(--gold));
+}
+
+.skill.burst.charged {
+  animation: burstPulse 1.9s ease-in-out infinite;
+}
+
+@keyframes burstPulse {
+  0%, 100% { box-shadow: 0 0 12px -2px var(--el, var(--gold)); }
+  50% { box-shadow: 0 0 30px 2px var(--el, var(--gold)); }
+}
+
+/* Energy ring around the burst button: a conic sweep clipped to a thin annulus. */
+.skill.burst .ring {
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
+  background: conic-gradient(var(--energy) calc(var(--fill, 0) * 360deg), rgba(0, 0, 0, 0.42) 0);
+  mask: radial-gradient(circle, transparent 0 46%, #000 47% 100%);
+  -webkit-mask: radial-gradient(circle, transparent 0 46%, #000 47% 100%);
+  pointer-events: none;
+}
+
+/* -- stamina wheel ------------------------------------------------------- */
+
+.stamina {
+  position: relative;
+  width: 74px;
+  height: 74px;
+}
+
+.stamina .ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: conic-gradient(from -90deg,
+    var(--stamina) calc(var(--fill, 1) * 300deg),
+    rgba(255, 255, 255, 0.13) 0 300deg,
+    transparent 300deg);
+  mask: radial-gradient(circle, transparent 0 76%, #000 78% 100%);
+  -webkit-mask: radial-gradient(circle, transparent 0 76%, #000 78% 100%);
+  filter: drop-shadow(0 0 5px rgba(232, 240, 192, 0.6));
+  transition: opacity 0.3s;
+}
+
+.stamina.full .ring { opacity: 0.34; }
+.stamina.empty .ring { filter: drop-shadow(0 0 7px rgba(224, 94, 78, 0.8)); }
+.stamina.empty { animation: shake 0.32s ease-in-out; }
+
+@keyframes shake {
+  0%, 100% { transform: none; }
+  25% { transform: translateX(-3px); }
+  75% { transform: translateX(3px); }
+}
+
+/* =========================================== bottom-left: chat / log ===== */
+
+.hud-bl {
+  position: absolute;
+  left: 18px;
+  bottom: 18px;
+  width: min(400px, 40vw);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.chatlog {
+  max-height: 168px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  /* Fade the top of the scrollback out rather than cutting it hard. */
+  mask-image: linear-gradient(180deg, transparent, #000 22px);
+  -webkit-mask-image: linear-gradient(180deg, transparent, #000 22px);
+  padding-right: 4px;
+}
+
+.chatlog.interactive { pointer-events: auto; }
+
+.chatlog .ln {
+  text-shadow: var(--ink-halo);
+  color: rgba(242, 234, 214, 0.90);
+  word-break: break-word;
+  animation: lineIn 0.28s ease-out both;
+}
+
+@keyframes lineIn {
+  from { opacity: 0; transform: translateX(-8px); }
+  to { opacity: 1; transform: none; }
+}
+
+.chatlog .ln .who { color: var(--accent); }
+.chatlog .ln.sys { color: rgba(232, 197, 106, 0.88); }
+.chatlog .ln.warn { color: #ffb27a; }
+.chatlog .ln.err { color: #ff9a86; }
+.chatlog .ln.loot { color: #cfe6a0; }
+.chatlog .ln.world .ch { color: #9fd0ff; }
+.chatlog .ln.party .ch { color: #a8f0c0; }
+.chatlog .ln .ch { opacity: 0.8; margin-right: 3px; }
+
+.chatbar {
+  display: none;
+  gap: 6px;
+}
+
+.chatbar.open { display: flex; }
+
+.chatbar select {
+  flex: 0 0 76px;
+  pointer-events: auto;
+  border: 1px solid var(--panel-edge);
+  border-radius: var(--radius);
+  background: rgba(12, 16, 26, 0.9);
+  color: var(--paper);
+  font-size: 12.5px;
+  padding: 7px 6px;
+  outline: none;
+}
+
+.chatbar input { flex: 1; padding: 7px 10px; font-size: 13px; }
+
+/* =============================================== interaction prompt ====== */
+
+.prompt {
+  position: absolute;
+  left: 50%;
+  bottom: 22%;
+  transform: translateX(-50%);
+  display: none;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px 8px 10px;
+  background: rgba(18, 22, 34, 0.78);
+  border: 1px solid rgba(226, 210, 168, 0.32);
+  border-radius: 26px;
+  backdrop-filter: blur(6px);
+  box-shadow: var(--shadow);
+  animation: promptIn 0.2s ease-out;
+}
+
+.prompt.show { display: flex; }
+
+@keyframes promptIn {
+  from { opacity: 0; transform: translate(-50%, 8px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+
+.prompt .k {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--paper);
+  color: #22283a;
+  font-family: var(--font-num);
+  font-weight: 700;
+  font-size: 14px;
+}
+
+.prompt .txt {
+  font-size: 13.5px;
+  letter-spacing: 0.06em;
+  color: var(--paper);
+}
+
+.prompt .sub {
+  font-size: 11.5px;
+  color: rgba(242, 234, 214, 0.55);
+  margin-left: 4px;
+}
+
+/* ================================================== 新手引导 (guide card) === */
+/*
+   Left edge, vertically centred: the four HUD corners are all occupied (party cards and the
+   quest tracker top-left, currencies and the minimap top-right, chat bottom-left, the action
+   bar bottom-right), and this is the one place a persistent card can sit without covering
+   any of them. `pointer-events` stays off for the card itself so it cannot eat a
+   click-to-move order aimed at the ground behind it — only the 跳过 button turns them on,
+   which is the rule the whole file follows.
+*/
+.guide {
+  position: absolute;
+  left: 18px;
+  top: 46%;
+  width: 244px;
+  display: none;
+  padding: 12px 14px 10px;
+  background: linear-gradient(180deg, rgba(28, 33, 50, 0.90), rgba(20, 24, 38, 0.86));
+  border: 1px solid var(--panel-edge);
+  border-left: 3px solid var(--gold);
+  border-radius: var(--radius);
+  backdrop-filter: blur(6px);
+  box-shadow: var(--shadow);
+  animation: guideIn 0.25s ease-out;
+}
+
+.guide.show { display: block; }
+
+@keyframes guideIn {
+  from { opacity: 0; transform: translateX(-10px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+.guide .ghead {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 5px;
+}
+
+.guide .ghead b {
+  font-size: 14.5px;
+  letter-spacing: 0.04em;
+  color: var(--gold);
+}
+
+.guide .gn {
+  margin-left: auto;
+  font-family: var(--font-num);
+  font-size: 12px;
+  color: rgba(242, 234, 214, 0.5);
+}
+
+.guide p {
+  margin: 0 0 8px;
+  font-size: 12.5px;
+  line-height: 1.62;
+  color: rgba(242, 234, 214, 0.82);
+}
+
+.guide .gkeys {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-bottom: 9px;
+}
+
+.guide .gk {
+  min-width: 22px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--paper);
+  color: #22283a;
+  font-family: var(--font-num);
+  font-weight: 700;
+  font-size: 12px;
+  text-align: center;
+}
+
+/* A mouse instruction is prose, not a key cap — rounded, tinted, and in the body font. */
+.guide .gk.mouse {
+  border-radius: 11px;
+  padding: 2px 9px;
+  background: rgba(111, 214, 224, 0.16);
+  border: 1px solid rgba(111, 214, 224, 0.55);
+  color: var(--accent);
+  font-family: var(--font);
+  font-weight: 600;
+}
+
+.guide .gbar {
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(242, 234, 214, 0.14);
+  overflow: hidden;
+}
+
+.guide .gbar i {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: linear-gradient(90deg, var(--gold-deep), var(--gold));
+  transition: width 0.3s ease-out;
+}
+
+.guide .gskip {
+  pointer-events: auto;
+  display: block;
+  margin: 7px 0 0 auto;
+  padding: 0;
+  background: none;
+  border: 0;
+  color: rgba(242, 234, 214, 0.45);
+  font-family: var(--font);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.guide .gskip:hover { color: var(--paper); }
+
+/* ================================================== crosshair / cursor === */
+
+.reticle {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 22px;
+  height: 22px;
+  margin: -11px 0 0 -11px;
+  display: none;
+}
+
+.reticle.show { display: block; }
+
+.reticle::before,
+.reticle::after {
+  content: '';
+  position: absolute;
+  background: rgba(242, 234, 214, 0.86);
+  box-shadow: 0 0 4px #000;
+}
+
+.reticle::before { left: 50%; top: 0; bottom: 0; width: 1px; margin-left: -0.5px; }
+.reticle::after { top: 50%; left: 0; right: 0; height: 1px; margin-top: -0.5px; }
+
+.reticle.charged::before,
+.reticle.charged::after { background: var(--gold); }
+
+/* Click-to-move ground marker (DOM ring, drawn where the ray hit). */
+.click-ring {
+  position: absolute;
+  width: 40px;
+  height: 40px;
+  margin: -20px 0 0 -20px;
+  border: 2px solid var(--gold);
+  border-radius: 50%;
+  pointer-events: none;
+  animation: clickRing 0.55s ease-out forwards;
+}
+
+@keyframes clickRing {
+  from { transform: scale(0.32); opacity: 0.95; }
+  to { transform: scale(1.25); opacity: 0; }
+}
+
+/* ================================================== world-space labels === */
+
+.wlabel {
+  position: absolute;
+  transform: translate(-50%, -100%);
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--paper);
+  /* A name plate hangs over the creature's own head, so its background is grass, snow or a lit body,
+     and a single 4 px blur is not enough on the bright ones: 「Lv.12」 (0.8 alpha, 10.5 px) measured
+     2.37:1 over noon meadow. The 2 px layer is the readable edge. */
+  text-shadow: 0 0 2px rgba(0, 0, 0, 0.9), 0 1px 4px rgba(0, 0, 0, 0.95);
+  pointer-events: none;
+  will-change: transform, left, top;
+}
+
+.wlabel .nm { letter-spacing: 0.04em; }
+
+.wlabel.enemy .nm { color: #ffd9c8; }
+.wlabel.npc .nm { color: #cfe6a0; }
+.wlabel.player .nm { color: #9fd0ff; }
+.wlabel.poi .nm { color: rgba(242, 234, 214, 0.78); font-size: 11.5px; }
+
+.wlabel .lv {
+  font-family: var(--font-num);
+  font-size: 10.5px;
+  /* Muted in the *colour*, not with `opacity`, because `opacity` fades the element's `text-shadow`
+     with it: at `opacity: 0.8` this line kept 80 % of its ink and only 80 % of the halo underneath it,
+     so no amount of shadow could lift it and it measured 2.79:1 over noon meadow while the name beside
+     it — same halo, opaque — sat at 5.26:1. A colour alpha dims the glyph and leaves the halo whole.
+     0.88 rather than the old 0.8 because even with the halo whole this 10.5 px line was still the
+     weakest thing on the HUD (3.26:1 over a noon meadow, against a 3:1 bar): the level of the thing
+     you are about to fight should not be the one line that needs a second look.
+
+     And a shadow was still not enough. At 10.5 px the strokes are thin enough that the shared
+     `--ink-halo` never accumulates around them the way it does around the 12 px name beside it: over
+     a bright noon meadow the ring under 「Lv.12」 measured 152,157,145 while the name's — same
+     shadow, 1.5 px more glyph — measured 106,117,91, and the two rows read 2.12:1 and 3.70:1 against
+     the same 3:1 bar. It failed only on the bright half of the world, which is what an intermittent
+     legible-check RED looks like. So this line stops fighting the ground and brings its own: a chip
+     dark enough to be the halo, padded past `RING` (2 px) on every side so the ring the probe (and
+     the eye) averages is chip and not meadow. 4.4:1 over luma 196, 15:1 at midnight. `:empty` because
+     an NPC has no level and padding alone would paint an 8 px blob over its head. */
+  color: rgba(242, 234, 214, 0.88);
+  margin-right: 4px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: rgba(6, 8, 12, 0.55);
+}
+
+.wlabel .lv:empty { display: none; }
+
+.wlabel .ebar {
+  position: relative;
+  height: 3px;
+  width: 62px;
+  margin: 2px auto 0;
+  background: rgba(0, 0, 0, 0.62);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.wlabel .ebar > i {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: linear-gradient(90deg, #b8412e, #ec6a4a);
+  transition: width 0.14s linear;
+}
+
+.wlabel .ebar > i.sh { background: linear-gradient(90deg, #8c7c46, var(--shield)); }
+
+.wlabel .aura {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-left: 4px;
+  vertical-align: -1px;
+  box-shadow: 0 0 6px currentColor;
+}
+
+.wlabel.boss .nm {
+  color: #ffb08a;
+  font-size: 13.5px;
+  letter-spacing: 0.1em;
+}
+
+.wlabel.boss .ebar { width: 96px; height: 5px; }
+
+/* 阶段 pips: which battle phase a boss is in, and how many it has left. */
+.wlabel .pips {
+  display: none;
+  margin-left: 5px;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  color: #ffcf7a;
+  text-shadow: 0 0 6px rgba(255, 150, 60, 0.85), 0 1px 3px rgba(0, 0, 0, 0.95);
+}
+
+/* The phase thresholds, over the hp fill (they are always below current hp). */
+.wlabel .ebar > i.tk {
+  inset: 0;
+  background: none;
+  transition: none;
+  z-index: 3;
+}
+
+/* =================================================== damage numbers ====== */
+
+.dmg {
+  position: absolute;
+  font-family: var(--font-num);
+  font-weight: 700;
+  font-size: 21px;
+  line-height: 1;
+  color: #fff;
+  /* Three layers, tightest first, because a damage number lands on *whatever the target is wearing*:
+     「46」 in salmon (`.taken`) over the traveller's own white coat measured 1.38:1 with only the old
+     `0 2px 5px` drop shadow — a blur that wide leaves the pixel next to the stroke at 80 % of the
+     background, and a blur offset downward leaves the top of the glyph bare. The 3 px layer is what
+     the eye reads the edge against; the 7 px and the offset one keep the soft weight the numbers had.
+     Measured by tools/legible-check.mjs at 12:00 over a lit body. */
+  text-shadow:
+    0 0 2px rgba(0, 0, 0, 0.95),
+    0 0 4px rgba(0, 0, 0, 0.9),
+    0 0 8px rgba(0, 0, 0, 0.8),
+    0 2px 6px rgba(0, 0, 0, 0.85);
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+  will-change: transform, opacity;
+  animation: dmgFloat 1.05s cubic-bezier(0.18, 0.8, 0.3, 1) forwards;
+}
+
+@keyframes dmgFloat {
+  0% { opacity: 0; transform: translate(-50%, -50%) scale(0.55); }
+  18% { opacity: 1; transform: translate(-50%, -62%) scale(1.18); }
+  30% { transform: translate(-50%, -70%) scale(1.0); }
+  100% { opacity: 0; transform: translate(-50%, -160%) scale(0.94); }
+}
+
+.dmg.crit {
+  font-size: 30px;
+  color: #fff0c0;
+  /* The gold flare stays, but it can no longer be the *nearest* thing to the stroke: an element
+     class wins over `.crit` on colour (a fire crit is `#ff7a4d`, luminance 0.36, not the cream
+     above), and that hue over a gold halo on sunlit grass measured 1.67:1. Dark ring inside, gold
+     outside — the flare is what says 「暴击」, the ring is what makes the digits digits. */
+  text-shadow:
+    0 0 3px rgba(0, 0, 0, 0.95),
+    0 0 8px rgba(0, 0, 0, 0.9),
+    0 0 18px var(--gold),
+    0 2px 6px #000;
+}
+
+.dmg.crit::after {
+  content: '!';
+  font-size: 0.7em;
+  vertical-align: 0.35em;
+  margin-left: 1px;
+}
+
+.dmg.heal { color: #b6f09a; }
+.dmg.taken { color: #ff8a72; font-size: 24px; }
+.dmg.wind { color: var(--wind); }
+.dmg.fire { color: var(--fire); }
+.dmg.water { color: var(--water); }
+.dmg.ice { color: var(--ice); }
+.dmg.lightning { color: var(--lightning); }
+.dmg.earth { color: var(--earth); }
+.dmg.light { color: var(--light); }
+
+.dmg.reaction {
+  font-size: 15px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  animation-duration: 1.35s;
+}
+
+/* 「护盾抵挡」/「同元素 · 护盾吸收」: the answer «this is the wrong element» has to be
+   legible without competing with the damage number it stands next to, so it is smaller and
+   colder than the green `.good` note that marks a 2× break. */
+.dmg.reaction.weak {
+  color: rgba(206, 220, 238, 0.74);
+  font-size: 13px;
+  letter-spacing: 0.06em;
+}
+
+.dmg.miss,
+.dmg.immune {
+  font-size: 16px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.72);
+  letter-spacing: 0.08em;
+}
+
+/* ===================================================== toast / banner ==== */
+
+.toasts {
+  position: absolute;
+  top: 12%;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  width: max-content;
+  max-width: 60vw;
+}
+
+.toast {
+  padding: 9px 20px;
+  background: rgba(18, 22, 34, 0.86);
+  border: 1px solid rgba(226, 210, 168, 0.30);
+  border-radius: 20px;
+  font-size: 13.5px;
+  letter-spacing: 0.06em;
+  color: var(--paper);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(6px);
+  animation: toastIn 0.3s cubic-bezier(0.16, 1, 0.3, 1) both,
+             toastOut 0.45s 2.9s ease-in forwards;
+  text-align: center;
+}
+
+.toast.good { border-color: rgba(127, 212, 106, 0.6); color: #d8f5c8; }
+.toast.bad { border-color: rgba(224, 94, 78, 0.6); color: #ffd0c4; }
+.toast.gold { border-color: var(--gold); color: #fff0c8; }
+
+@keyframes toastIn {
+  from { opacity: 0; transform: translateY(-14px) scale(0.94); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes toastOut {
+  to { opacity: 0; transform: translateY(-10px); }
+}
+
+/* Big centred banner: zone entry, chamber cleared, level up. */
+.banner {
+  position: absolute;
+  left: 50%;
+  top: 34%;
+  transform: translate(-50%, -50%);
+  text-align: center;
+  pointer-events: none;
+  animation: bannerIn 3.4s ease-out forwards;
+}
+
+.banner .t {
+  font-size: clamp(26px, 4.6vw, 46px);
+  font-weight: 300;
+  letter-spacing: 0.30em;
+  text-indent: 0.30em;
+  color: var(--paper);
+  text-shadow: 0 0 30px rgba(232, 197, 106, 0.5), 0 3px 12px #000;
+}
+
+.banner .s {
+  margin-top: 10px;
+  font-size: 13px;
+  letter-spacing: 0.34em;
+  text-indent: 0.34em;
+  color: rgba(232, 197, 106, 0.8);
+  /* `text-shadow` does not inherit from `.banner` -- it is set on `.t`, which is a sibling -- so this
+     line had none at all, and 13 px gold at 0.8 alpha over a sunlit meadow measured 2.02:1 while the
+     title above it sat at 3.66:1. It is the line that names the quest, the chapter or the chamber.
+     The wide layer is this banner's own (it sits over the brightest thing in frame more often than the
+     rest of the HUD); the readable edge is the shared 2 px one. */
+  text-shadow: var(--ink-halo), 0 0 12px rgba(0, 0, 0, 0.75);
+}
+
+.banner .rule {
+  width: 0;
+  height: 1px;
+  margin: 16px auto 0;
+  background: linear-gradient(90deg, transparent, var(--gold), transparent);
+  animation: ruleGrow 1.4s 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes ruleGrow { to { width: 260px; } }
+
+/* BOSS 换阶段: the same statement as a zone title, in the boss's own heat, one line higher
+   so it cannot land on top of a zone banner that is still fading. */
+.banner.phase { top: 23%; }
+.banner.phase .t {
+  font-weight: 500;
+  color: #ffd0a0;
+  text-shadow: 0 0 34px rgba(255, 122, 60, 0.75), 0 3px 12px #000;
+}
+.banner.phase .s { color: rgba(255, 176, 122, 0.92); }
+.banner.phase .rule { background: linear-gradient(90deg, transparent, #ff8a4a, transparent); }
+
+@keyframes bannerIn {
+  0% { opacity: 0; transform: translate(-50%, -50%) scale(1.06); filter: blur(8px); }
+  14% { opacity: 1; transform: translate(-50%, -50%) scale(1); filter: none; }
+  78% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+/* ============================================ quest completion card ====== */
+/* Centred, dismissible, and deliberately *not* a scrim: the world keeps running behind it
+   (see ui/questend.js), so only the card itself takes pointer events. */
+
+.questend {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  z-index: 40;
+}
+
+.questend .qe-card {
+  position: relative;
+  width: min(460px, 82vw);
+  padding: 22px 26px 18px;
+  pointer-events: auto;
+  cursor: pointer;
+  text-align: center;
+  border-radius: 10px;
+  border: 1px solid var(--panel-edge);
+  background:
+    radial-gradient(120% 90% at 50% 0%, rgba(232, 197, 106, 0.16), transparent 62%),
+    linear-gradient(180deg, rgba(46, 53, 74, 0.96), rgba(30, 35, 50, 0.97));
+  box-shadow: var(--shadow), 0 0 40px rgba(232, 197, 106, 0.14);
+  animation: qeIn 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.questend .qe-glow {
+  position: absolute;
+  left: 50%;
+  top: -1px;
+  width: 70%;
+  height: 1px;
+  transform: translateX(-50%);
+  background: linear-gradient(90deg, transparent, var(--gold), transparent);
+}
+
+.questend .qe-tag {
+  display: inline-block;
+  padding: 2px 12px;
+  border: 1px solid rgba(232, 197, 106, 0.5);
+  border-radius: 999px;
+  color: var(--gold);
+  font-size: 11px;
+  letter-spacing: 0.30em;
+  text-indent: 0.30em;
+}
+
+.questend h3 {
+  margin: 12px 0 0;
+  font-size: 22px;
+  font-weight: 400;
+  letter-spacing: 0.06em;
+  color: var(--paper);
+}
+
+.questend .qe-chapter { color: var(--gold); }
+/* The chapter and the quest name are two spans in one heading on purpose — the gold marks which
+   part of the story closed, and the name is the line the player remembers, so it carries the
+   weight. A probe checks both classes have a rule: an unstyled span is a design decision that
+   silently did not happen. */
+.questend .qe-name { color: var(--paper); font-weight: 500; letter-spacing: 0.08em; }
+
+.questend .qe-outro {
+  margin: 12px 0 0;
+  font-size: 13px;
+  line-height: 1.75;
+  color: var(--paper-dim);
+}
+
+.questend .qe-label {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--gold-deep);
+  font-size: 11px;
+  letter-spacing: 0.26em;
+  text-indent: 0.26em;
+}
+
+.questend .qe-rewards {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(226, 210, 168, 0.16);
+}
+
+.questend .qe-grid {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+}
+
+.questend .qe-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-radius: var(--radius);
+  border: 1px solid rgba(226, 210, 168, 0.18);
+  background: rgba(20, 24, 36, 0.6);
+  font-size: 12px;
+}
+
+.questend .qe-ico { font-style: normal; font-size: 15px; }
+.questend .qe-nm { color: var(--paper-dim); }
+.questend .qe-n { color: var(--gold); font-family: var(--font-num); }
+
+.questend .qe-next {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(226, 210, 168, 0.16);
+}
+
+.questend .qe-next b {
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--paper);
+}
+
+.questend .qe-next p {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--ink-soft);
+  color: rgba(217, 207, 182, 0.72);
+}
+
+.questend .qe-goal {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.questend .qe-goal span {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: rgba(232, 197, 106, 0.16);
+  color: var(--gold);
+  font-size: 11px;
+}
+
+.questend .qe-goal em { font-style: normal; color: var(--paper); }
+
+.questend footer {
+  margin-top: 18px;
+  display: flex;
+  justify-content: center;
+}
+
+@keyframes qeIn {
+  0% { opacity: 0; transform: translateY(14px) scale(0.97); }
+  100% { opacity: 1; transform: none; }
+}
+
+/* ==================================================== screen effects ===== */
+
+/* Red vignette when hurt. */
+.hurt {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+  background: radial-gradient(ellipse at center, transparent 42%, rgba(150, 20, 14, 0.62) 100%);
+  transition: opacity 0.42s ease-out;
+}
+
+.hurt.on { opacity: 1; transition: opacity 0.06s; }
+
+/* Sheer-cold frost creep at the screen edges. */
+.frost {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+  background:
+    radial-gradient(ellipse at center, transparent 34%, rgba(190, 232, 255, 0.5) 100%);
+  transition: opacity 0.6s ease-out;
+}
+
+/* Death / down overlay. */
+.downed {
+  position: absolute;
+  inset: 0;
+  display: none;
+  place-items: center;
+  background: rgba(6, 8, 14, 0.66);
+  backdrop-filter: grayscale(0.9) blur(2px);
+  pointer-events: auto;
+}
+
+.downed.show { display: grid; }
+
+.downed .box { text-align: center; }
+
+.downed h2 {
+  margin: 0 0 6px;
+  font-size: 34px;
+  font-weight: 300;
+  letter-spacing: 0.28em;
+  text-indent: 0.28em;
+  color: #ffd0c4;
+}
+
+.downed p {
+  margin: 0 0 22px;
+  font-size: 13px;
+  color: rgba(242, 234, 214, 0.6);
+  letter-spacing: 0.1em;
+}
+
+/* The auto-respawn countdown, under the buttons: it is information, not the offer. */
+.downed .wait {
+  margin-top: 16px;
+  min-height: 16px;
+  font-size: 12px;
+  letter-spacing: 0.14em;
+  color: rgba(226, 210, 168, 0.5);
+}
+
+/* ======================================================== panels ========= */
+
+.scrim {
+  position: absolute;
+  inset: 0;
+  background: rgba(8, 10, 18, 0.62);
+  backdrop-filter: blur(3px);
+  pointer-events: auto;
+  animation: fadeIn 0.18s ease-out;
+  display: grid;
+  place-items: center;
+  padding: 3vh 3vw;
+}
+
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+.panel {
+  position: relative;
+  width: min(1040px, 94vw);
+  height: min(700px, 90vh);
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--panel-edge);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+  overflow: hidden;
+  animation: panelIn 0.24s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.panel.narrow { width: min(520px, 92vw); height: auto; max-height: 88vh; }
+
+@keyframes panelIn {
+  from { opacity: 0; transform: translateY(18px) scale(0.985); }
+  to { opacity: 1; transform: none; }
+}
+
+.panel > header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 18px;
+  border-bottom: 1px solid rgba(226, 210, 168, 0.16);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.05), transparent);
+}
+
+.panel > header h2 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 400;
+  letter-spacing: 0.18em;
+  color: var(--paper);
+}
+
+.panel > header .spacer { flex: 1; }
+
+.panel .close {
+  pointer-events: auto;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 1px solid var(--panel-edge);
+  background: transparent;
+  color: var(--paper);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.14s, border-color 0.14s, transform 0.14s;
+}
+
+.panel .close:hover {
+  background: rgba(224, 94, 78, 0.28);
+  border-color: #e05e4e;
+  transform: rotate(90deg);
+}
+
+.panel > .body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+}
+
+.panel .col {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px 16px;
+}
+
+.panel .col.side {
+  flex: 0 0 234px;
+  border-right: 1px solid rgba(226, 210, 168, 0.14);
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.panel .col.main { flex: 1; }
+
+.panel > footer {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 16px;
+  border-top: 1px solid rgba(226, 210, 168, 0.16);
+  background: rgba(0, 0, 0, 0.22);
+  font-size: 12.5px;
+  color: rgba(242, 234, 214, 0.66);
+}
+
+.panel > footer .spacer { flex: 1; }
+
+/* -- tabs ---------------------------------------------------------------- */
+
+.tabs {
+  display: flex;
+  gap: 4px;
+}
+
+.tab {
+  padding: 7px 15px;
+  border: 1px solid transparent;
+  border-radius: 16px;
+  background: transparent;
+  color: rgba(242, 234, 214, 0.56);
+  font-size: 13px;
+  letter-spacing: 0.1em;
+  cursor: pointer;
+  transition: color 0.14s, background 0.14s, border-color 0.14s;
+}
+
+.tab:hover { color: var(--paper); background: rgba(255, 255, 255, 0.06); }
+
+.tab.active {
+  color: #23283a;
+  background: var(--gold);
+  border-color: rgba(255, 246, 216, 0.7);
+  font-weight: 600;
+}
+
+/* -- generic rows / lists ------------------------------------------------ */
+
+.list-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background 0.13s, border-color 0.13s;
+}
+
+.list-row:hover { background: rgba(255, 255, 255, 0.06); }
+
+.list-row.sel {
+  background: rgba(232, 197, 106, 0.14);
+  border-color: rgba(232, 197, 106, 0.46);
+}
+
+.list-row .t { flex: 1; min-width: 0; }
+.list-row .t b { display: block; font-weight: 500; font-size: 13.5px; }
+.list-row .t small { color: rgba(242, 234, 214, 0.52); font-size: 11.5px; }
+.list-row.dim { opacity: 0.45; }
+.list-row .qty { font-family: var(--font-num); font-size: 12px; color: rgba(242, 234, 214, 0.5); }
+.list-row .qty.up { color: var(--gold); }
+
+/* 探索度 on a zone row: a number, not a bar — the row is 34 px tall and the bar would be the
+   thickness of the text. Gold at 100% is the same "this one is finished" colour the star rows
+   and the claimed-achievement rows use. */
+.list-row .explore {
+  font-family: var(--font-num);
+  font-size: 12px;
+  color: rgba(242, 234, 214, 0.62);
+  letter-spacing: 0.02em;
+}
+.list-row .explore.full { color: var(--gold); }
+/* A milestone waiting to be collected wins over both of the above, and it is the *cyan* accent
+   rather than a brighter gold: 100%-and-unclaimed carries both classes, so "finished" and
+   "there is something here for you" have to be two different colours or the second one is
+   invisible on exactly the zone that has the biggest reward waiting. The 🎁 in the text says the
+   same thing without relying on colour at all. */
+.list-row .explore.ready { color: var(--accent); }
+
+/* -- 元素共鸣 (party panel) ------------------------------------------------ */
+
+/* An inactive resonance still has to be readable — it is the instruction for how to get
+   it — so the off state dims rather than hides, and the two states differ in more than
+   opacity: the active one is lit gold on a gold wash with a left rule, and its condition
+   line reads 已激活 instead of the requirement. */
+.res-list { display: flex; flex-direction: column; gap: 3px; }
+
+.res-row {
+  padding: 5px 8px 6px;
+  border-radius: 5px;
+  border-left: 2px solid transparent;
+  opacity: 0.5;
+}
+
+.res-row b { font-size: 12.5px; font-weight: 500; }
+.res-row i { font-style: normal; font-size: 10.5px; margin-left: 6px; color: rgba(242, 234, 214, 0.46); }
+.res-row small { display: block; font-size: 10.5px; color: rgba(242, 234, 214, 0.52); line-height: 1.35; }
+
+.res-row.on {
+  opacity: 1;
+  background: rgba(232, 197, 106, 0.11);
+  border-left-color: var(--gold);
+}
+
+.res-row.on b { color: var(--gold); }
+.res-row.on i { color: rgba(232, 197, 106, 0.8); }
+.res-row.on small { color: rgba(242, 234, 214, 0.78); }
+
+/* -- number stepper ------------------------------------------------------ */
+
+.stepper { display: flex; align-items: center; gap: 6px; }
+.stepper .num { min-width: 26px; text-align: center; font-size: 15px; color: var(--gold); }
+
+/* -- weapon strengthening pane -------------------------------------------- */
+
+/* Four ore kinds, each a label line plus a stepper, all inside the 234 px detail
+   column: at the browser's default 1em paragraph margins the confirm button lands
+   below the fold. Tighten the rhythm here rather than dropping information. */
+.wpn-up p { margin: 3px 0; }
+.wpn-up h4 { margin: 0 0 2px; }
+.wpn-up .stars { margin-bottom: 2px; }
+.wpn-up .stepper { margin: 2px 0 7px; }
+
+/* -- cooking ------------------------------------------------------------- */
+
+.cook-head { display: flex; gap: 14px; align-items: flex-start; margin-bottom: 4px; }
+
+.cook-head .ico {
+  font-size: 40px;
+  line-height: 1;
+  width: 64px;
+  height: 64px;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  background: radial-gradient(circle at 40% 30%, rgba(232, 197, 106, 0.22), rgba(12, 16, 26, 0.5));
+  border: 1px solid rgba(232, 197, 106, 0.3);
+  flex: none;
+}
+
+.cook-head h3 { margin: 0 0 3px; font-size: 17px; }
+.cook-head p { margin: 0 0 3px; }
+
+.cook-ing { display: flex; flex-wrap: wrap; gap: 8px; }
+
+.cook-ing .ing {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.cook-ing .ico { font-size: 16px; }
+.cook-ing .nm { font-size: 12.5px; }
+.cook-ing .n { font-family: var(--font-num); font-size: 12px; }
+.cook-ing .n.up { color: #a8ea92; }
+.cook-ing .n.down { color: #ff9a86; }
+
+/* Stacked odds bar. Widths are set inline from cookOdds, so the three segments
+   always sum to the full width without the CSS needing to know the numbers. */
+.cook-odds {
+  display: flex;
+  height: 9px;
+  border-radius: 5px;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.cook-odds .seg { display: block; height: 100%; }
+.cook-odds .seg.perfect { background: linear-gradient(90deg, #ffd76a, #ffb03a); }
+.cook-odds .seg.normal { background: rgba(223, 230, 240, 0.62); }
+/* Failure gets its own hue rather than a darker grey: at 4% the segment is a few
+   pixels wide, and two greys side by side are indistinguishable at that size. */
+.cook-odds .seg.ruined { background: rgba(150, 108, 132, 0.85); }
+
+.cook-legend { display: flex; gap: 14px; margin-top: 7px; font-size: 11.5px; }
+.cook-legend .lg { display: flex; align-items: center; gap: 5px; color: rgba(242, 234, 214, 0.65); }
+.cook-legend .lg::before { content: ''; width: 9px; height: 9px; border-radius: 2px; }
+.cook-legend .lg.perfect::before { background: #ffd76a; }
+.cook-legend .lg.normal::before { background: rgba(223, 230, 240, 0.7); }
+.cook-legend .lg.ruined::before { background: rgba(150, 108, 132, 0.9); }
+
+/* -- shop shelves --------------------------------------------------------- */
+
+/* One row per entry, five columns. The price column is `1fr` and everything else is
+   fixed: barter entries carry two cost chips and the row must not reflow the stock
+   column out of alignment with the rows above it. */
+.shop-list { display: flex; flex-direction: column; gap: 6px; }
+
+.shop-row {
+  display: grid;
+  grid-template-columns: 34px 1fr 104px auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.shop-row.dim { opacity: 0.5; }
+.shop-row .ico { font-size: 22px; text-align: center; }
+.shop-row .t { min-width: 0; }
+.shop-row .t b { display: block; font-size: 13.5px; font-weight: 500; }
+.shop-row .cost { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 3px; }
+/* Rarity as a text colour, because a shop row has no slot tile to tint: the blacksmith's
+   3★ fodder and the trader's 5★ blade must not read as the same purchase. */
+.shop-row .t b.r3 { color: #8fb6da; }
+.shop-row .t b.r4 { color: #c3a6f0; }
+.shop-row .t b.r5 { color: #f0c070; }
+.shop-row .stk { text-align: right; }
+.shop-row .stk .n { display: block; font-family: var(--font-num); font-size: 12px; }
+.shop-row .stk .n.down { color: #ff9a86; }
+.shop-row .stk .rs { display: block; }
+.shop-row .acts { display: flex; gap: 6px; }
+
+/* Cost/purse chip. Shared by the row prices and the footer purse so a price and the
+   balance it has to be compared against are the same shape.
+   Named `pchip`, not `chip`: `.chip` is already the leaderboard's *tab*, which carries
+   `cursor: pointer` and a hover lift — a price that highlights under the mouse reads as a
+   button, and these are the one part of the row that cannot be clicked. */
+.pchip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 10px;
+  font-family: var(--font-num);
+  font-size: 11.5px;
+  color: rgba(242, 234, 214, 0.72);
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.pchip.up { color: #a8ea92; }
+.pchip.down { color: #ff9a86; border-color: rgba(255, 154, 134, 0.34); }
+.shop-purse { display: flex; gap: 8px; }
+
+/* A counter the player has not unlocked still shows its stock — knowing what is up there
+   is the reason to come back — but the whole shelf greys out, not just the two rows whose
+   own rank gate happens to bite. */
+.shop-list.locked .shop-row { opacity: 0.45; }
+
+/* --- mail ---------------------------------------------------------------- */
+
+/* An unread letter is marked on the left edge rather than by colouring the subject: the
+   list also dims *claimed* letters, and two colour states on the same text cancel out. */
+.mail-row { border-left: 2px solid transparent; }
+.mail-row.unread { border-left-color: var(--gold); }
+.mail-row.unread b { color: rgba(255, 246, 226, 0.98); }
+.mail-row .qty.up { color: #a8ea92; }
+/* The list column is narrow, so the sender is truncated rather than wrapped and the date
+   gets its own line — wrapping split "9月5" from "日 14:27" across two lines. */
+.mail-row small { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mail-row .dt {
+  display: block;
+  font-family: var(--font-num);
+  font-style: normal;
+  font-size: 11px;
+  color: rgba(242, 234, 214, 0.4);
+}
+
+.mail-body {
+  margin: 10px 2px 14px;
+  font-size: 13px;
+  line-height: 1.75;
+  color: rgba(242, 234, 214, 0.86);
+  white-space: pre-wrap;
+}
+
+.mail-attach {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.mail-attach .att {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  width: 74px;
+  padding: 8px 4px;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.mail-attach .att .ico { font-size: 24px; }
+.mail-attach .att .n { font-family: var(--font-num); font-size: 12px; }
+.mail-attach .att .nm { text-align: center; line-height: 1.3; }
+/* Claimed attachments stay on screen — the letter is the receipt — but must not look
+   collectable, or every reopened letter reads as a reward the player missed. */
+.mail-attach.taken { opacity: 0.45; filter: grayscale(0.7); }
+
+/* HUD badge. Lives in the currency row so appearing costs no layout above the minimap. */
+.mail-chip {
+  cursor: pointer;
+  color: var(--gold);
+  gap: 3px;
+}
+.mail-chip:hover { filter: brightness(1.2); }
+/* The trophy chip shares the mail chip's box but not its colour: two gold pills side by side
+   in the currency row read as one widget, and the whole point is that they are separate errands. */
+.mail-chip.ach { color: #a8ea92; }
+/* The 探索奖励 chip borrows the map row's cyan (`.explore.ready`) rather than inventing a fourth
+   colour: the chip and the row it sends you to are the same errand, and a player who has seen one
+   should recognise the other. Four chips, four colours, four destinations. */
+.mail-chip.gift { color: var(--accent); }
+/* 派遣 is the fourth, and it has to be told apart from the gift chip standing right next to it —
+   both are "something is waiting for you" — so it takes the one hue the currency row does not
+   use anywhere else. */
+.mail-chip.exp { color: #c8a8ea; }
+
+/* --- achievements -------------------------------------------------------- */
+
+.ach {
+  padding: 9px 12px;
+  margin-bottom: 7px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+/* Collectable is the state worth a colour. `done` is the state worth *losing* one: a finished
+   achievement is a memento, and a list where everything glows says nothing. */
+.ach.ready { border-color: rgba(232, 197, 106, 0.5); background: rgba(232, 197, 106, 0.07); }
+.ach.done { opacity: 0.72; }
+
+.ach .row { display: flex; align-items: center; gap: 10px; }
+.ach .row .t { flex: 1; min-width: 0; }
+.ach .row b { display: block; font-size: 13.5px; }
+.ach .row small { display: block; font-size: 11.5px; line-height: 1.4; }
+
+/* Fixed-width tier badge so every name in the list starts at the same x. */
+.ach .tier {
+  flex: 0 0 22px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--gold);
+}
+.ach.done .tier { color: #a8ea92; }
+
+.ach .pay { flex: 0 0 auto; text-align: right; }
+.ach .prog { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.ach .prog .bar { flex: 1; height: 5px; }
+.ach .prog .bar > i { background: linear-gradient(90deg, var(--gold-deep), var(--gold)); }
+.ach.done .prog .bar > i { background: linear-gradient(90deg, #4f9c3c, #a8ea92); }
+.ach .prog .num { font-family: var(--font-num); font-size: 11.5px; color: rgba(242, 234, 214, 0.55); }
+
+.ach-cat .qty.up { color: #a8ea92; }
+
+/* --- 探索派遣 ------------------------------------------------------------- */
+
+/* A dispatch card is an achievement card with a different left column, so it shares the box
+   rather than copying it: one padding, one radius, one 「collectable」 border. */
+.exp {
+  padding: 9px 12px;
+  margin-bottom: 7px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+.exp.ready { border-color: rgba(232, 197, 106, 0.5); background: rgba(232, 197, 106, 0.07); }
+/* An empty slot is an invitation, not a state worth a frame: it keeps the row height so the
+   list does not jump when a trip is claimed, and gets out of the way otherwise. */
+.exp.idle { border-style: dashed; opacity: 0.6; }
+
+.exp .row { display: flex; align-items: center; gap: 10px; }
+.exp .row .t { flex: 1; min-width: 0; }
+.exp .row b { display: block; font-size: 13.5px; }
+.exp .row small { display: block; font-size: 11.5px; line-height: 1.4; }
+
+/* The character's initial, in a fixed-width disc so every name in the list starts at the
+   same x — the same reason `.ach .tier` is fixed. */
+.exp .who {
+  flex: 0 0 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  font-size: 12.5px;
+  color: var(--gold);
+  background: rgba(232, 197, 106, 0.12);
+  border: 1px solid rgba(232, 197, 106, 0.3);
+}
+.exp.idle .who { color: rgba(242, 234, 214, 0.4); background: none; border-style: dashed; }
+
+/* Countdown and 领取 sit on one line, right-aligned, and the countdown keeps its own width
+   so the button does not slide left as 「3小时59分」 shortens. */
+.exp .pay { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; }
+.exp .pay .rem { font-family: var(--font-num); min-width: 74px; text-align: right; }
+
+/* The two pickers: a label, then pills that wrap. */
+.exp-pick { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.exp-pick > .tiny { flex: 0 0 30px; }
+/* A busy character stays visible — Ta is the reason a slot is occupied — but must not look
+   pickable. `pointer-events` stays on so the click can still say why. */
+.exp-pick .chip.dim { opacity: 0.4; }
+
+.exp-preview { display: flex; align-items: center; gap: 10px; margin-top: 4px; }
+
+/* A 领取 button inside a list row cannot be the full-size one the footers use. */
+.btn.tiny-btn { padding: 4px 9px; font-size: 11.5px; min-width: 0; }
+
+.muted { color: rgba(242, 234, 214, 0.5); }
+.tiny { font-size: 11.5px; }
+.num { font-family: var(--font-num); }
+.right { text-align: right; }
+.center { text-align: center; }
+.hidden { display: none !important; }
+.gold { color: var(--gold); }
+.bad { color: #ff9a86; }
+.good { color: #a8ea92; }
+
+hr.sep {
+  border: 0;
+  border-top: 1px solid rgba(226, 210, 168, 0.16);
+  margin: 12px 0;
+}
+
+h3.sec {
+  margin: 0 0 10px;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.2em;
+  color: rgba(232, 197, 106, 0.78);
+  text-transform: uppercase;
+}
+
+/* -- leaderboard tabs ---------------------------------------------------- */
+
+.lb-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.lb-head h3.sec { margin-bottom: 8px; }
+.lb-tabs { display: flex; gap: 6px; margin-bottom: 8px; }
+
+/* Friend search: the field takes the slack so the button never wraps under it. */
+.add-friend { display: flex; align-items: stretch; gap: 8px; margin-bottom: 8px; }
+.add-friend .field { flex: 1; min-width: 0; padding: 8px 11px; font-size: 13px; }
+.add-friend .btn { flex: 0 0 auto; }
+
+.chip {
+  padding: 3px 10px;
+  font: inherit;
+  font-size: 11.5px;
+  color: rgba(242, 234, 214, 0.66);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: color 0.14s, background 0.14s, border-color 0.14s;
+}
+
+.chip:hover { color: var(--ink); background: rgba(255, 255, 255, 0.1); }
+
+.chip.sel {
+  color: #22190a;
+  background: linear-gradient(180deg, #f0d68a, #d9b458);
+  border-color: rgba(240, 214, 138, 0.7);
+}
+
+/* -- item grid ----------------------------------------------------------- */
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(84px, 1fr));
+  gap: 9px;
+}
+
+.slot {
+  position: relative;
+  aspect-ratio: 1;
+  border-radius: 7px;
+  border: 1px solid rgba(226, 210, 168, 0.20);
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.07), rgba(0, 0, 0, 0.22));
+  cursor: pointer;
+  overflow: hidden;
+  transition: transform 0.12s, border-color 0.14s, box-shadow 0.14s;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  padding: 5px;
+}
+
+.slot:hover {
+  transform: translateY(-2px);
+  border-color: var(--gold);
+  box-shadow: 0 5px 16px rgba(0, 0, 0, 0.45);
+}
+
+.slot.sel { border-color: var(--gold); box-shadow: 0 0 0 2px rgba(232, 197, 106, 0.4); }
+
+/* Rarity is carried by the slot background wash, like the real thing. */
+.slot.r1 { background: linear-gradient(160deg, #5a6070, #2c3040); }
+.slot.r2 { background: linear-gradient(160deg, #4d6b58, #26332c); }
+.slot.r3 { background: linear-gradient(160deg, #4a6a8e, #232f3d); }
+.slot.r4 { background: linear-gradient(160deg, #6b5698, #2e2740); }
+.slot.r5 { background: linear-gradient(160deg, #a8763a, #4a3018); }
+
+.slot .ico {
+  position: absolute;
+  inset: 5px 5px 20px;
+  display: grid;
+  place-items: center;
+  font-size: 27px;
+  opacity: 0.94;
+  pointer-events: none;
+  filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.55));
+}
+
+.slot .nm {
+  position: relative;
+  font-size: 10.5px;
+  line-height: 1.2;
+  max-height: 2.4em;
+  overflow: hidden;
+  color: rgba(255, 255, 255, 0.94);
+  text-shadow: 0 1px 3px #000;
+  pointer-events: none;
+}
+
+.slot .ct {
+  position: absolute;
+  top: 3px;
+  right: 5px;
+  font-family: var(--font-num);
+  font-size: 11.5px;
+  color: #fff;
+  text-shadow: 0 1px 3px #000;
+  pointer-events: none;
+}
+
+.slot .lv {
+  position: absolute;
+  top: 3px;
+  left: 5px;
+  font-family: var(--font-num);
+  font-size: 10.5px;
+  padding: 0 4px;
+  border-radius: 5px;
+  background: rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+}
+
+.slot.equipped::after {
+  content: '';
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--hp);
+  box-shadow: 0 0 6px var(--hp);
+}
+
+/* Fodder picked for artifact enhancement: the piece is about to be destroyed, so it
+   reads as struck through rather than merely selected. */
+.slot.fodder {
+  border-color: var(--bad, #d4645a);
+  box-shadow: 0 0 0 2px rgba(212, 100, 90, 0.35);
+  opacity: 0.55;
+}
+
+/* Bottom-right: the top-left corner is already the `.lv` badge and the top-right is the
+   equipped dot, and a piece can be both levelled and fodder. */
+.slot.fodder::before {
+  content: '✕';
+  position: absolute;
+  bottom: 2px;
+  right: 5px;
+  font-size: 15px;
+  font-weight: 700;
+  color: #ff9a86;
+  text-shadow: 0 0 4px rgba(0, 0, 0, 0.9);
+  pointer-events: none;
+}
+
+.slot.target {
+  border-color: var(--gold);
+  box-shadow: 0 0 0 2px rgba(232, 197, 106, 0.6), 0 0 14px rgba(232, 197, 106, 0.3);
+}
+
+.slot.empty {
+  border-style: dashed;
+  background: rgba(0, 0, 0, 0.2);
+  cursor: default;
+}
+
+.slot.empty:hover { transform: none; border-color: rgba(226, 210, 168, 0.2); box-shadow: none; }
+
+/* -- stat table ---------------------------------------------------------- */
+
+.stats {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 5px 12px;
+  font-size: 13px;
+}
+
+.stats dt { color: rgba(242, 234, 214, 0.6); margin: 0; }
+.stats dd {
+  margin: 0;
+  font-family: var(--font-num);
+  text-align: right;
+  color: var(--paper);
+}
+
+.stats dd.up { color: var(--hp); }
+
+/* -- character portrait block ------------------------------------------- */
+
+.portrait {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 3 / 4;
+  border-radius: 8px;
+  overflow: hidden;
+  background: linear-gradient(170deg, rgba(255, 255, 255, 0.12), rgba(0, 0, 0, 0.4));
+  display: grid;
+  place-items: center;
+  margin-bottom: 12px;
+}
+
+.portrait .big {
+  font-size: 84px;
+  font-weight: 200;
+  color: rgba(255, 255, 255, 0.9);
+  text-shadow: 0 0 40px var(--el, #fff);
+}
+
+/* The glyph is the fallback for a failed WebGL context, so it only goes away once
+   the live render is actually attached. */
+.portrait.has3d .big { display: none; }
+
+.portrait canvas.portrait-3d {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  /* The portrait renderer has no bloom pass of its own — a 220x300 composer for one
+     image is not worth it — so the element glow behind the character is done here. */
+  background:
+    radial-gradient(58% 42% at 50% 62%, color-mix(in srgb, var(--el, #fff) 26%, transparent), transparent 72%),
+    radial-gradient(120% 90% at 50% 8%, rgba(255, 255, 255, 0.08), transparent 60%);
+}
+
+.portrait .el-badge {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: var(--el, #888);
+  display: grid;
+  place-items: center;
+  font-size: 15px;
+  color: #1c2030;
+  box-shadow: 0 0 14px var(--el, #888);
+}
+
+.stars { color: var(--gold); font-size: 13px; letter-spacing: 0.1em; }
+
+/* -- talent rows --------------------------------------------------------- */
+
+.talent {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+}
+
+.talent .tico {
+  flex: 0 0 34px;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.34);
+  border: 1px solid var(--panel-edge);
+  display: grid;
+  place-items: center;
+  font-size: 15px;
+}
+
+.talent .tinfo { flex: 1; min-width: 0; }
+.talent .tinfo b { display: block; font-size: 13px; font-weight: 500; }
+.talent .tinfo small { color: rgba(242, 234, 214, 0.52); font-size: 11.5px; }
+
+/* ======================================================== world map ===== */
+
+.mapwrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  background: rgba(10, 14, 24, 0.7);
+  cursor: crosshair;
+}
+
+.mapwrap canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.map-pins { position: absolute; inset: 0; pointer-events: none; }
+
+.pin {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  pointer-events: auto;
+  cursor: pointer;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  font-size: 13px;
+  border-radius: 50%;
+  background: rgba(14, 18, 30, 0.86);
+  border: 1px solid rgba(226, 210, 168, 0.5);
+  transition: transform 0.14s, box-shadow 0.14s;
+  text-shadow: 0 1px 2px #000;
+}
+
+.pin:hover { transform: translate(-50%, -50%) scale(1.32); box-shadow: 0 0 12px var(--gold); z-index: 2; }
+.pin.waypoint { border-color: var(--accent); color: var(--accent); }
+.pin.chest { border-color: var(--gold); color: var(--gold); }
+.pin.chest.done { opacity: 0.35; }
+.pin.puzzle { border-color: #b586f0; color: #d8b8ff; }
+.pin.dungeon { border-color: #ff8a72; color: #ffb0a0; }
+.pin.statue { border-color: #a8f0d8; color: #c8f8e8; }
+.pin.warmth { border-color: #ffb27a; color: #ffd0a8; }
+/* An anchor you have not lit yet: dim, grey and not offering a jump. */
+.pin.locked {
+  border-color: rgba(226, 210, 168, 0.3);
+  color: rgba(226, 210, 168, 0.5);
+  background: rgba(14, 18, 30, 0.7);
+  font-size: 10px;
+  cursor: not-allowed;
+}
+.pin.locked:hover { box-shadow: 0 0 10px rgba(226, 210, 168, 0.35); }
+.pin.npc { border-color: #cfe6a0; color: #dff0c0; }
+/* The tracked objective. Brighter than every collectible pin and pulsing, because on a 440 m
+   map the question this view answers is "which of these do I walk to". */
+.pin.quest {
+  border-color: #ffd15c;
+  color: #241a06;
+  background: #ffd15c;
+  box-shadow: 0 0 14px rgba(255, 209, 92, 0.75);
+  animation: questPin 1.6s ease-in-out infinite;
+  z-index: 3;
+}
+@keyframes questPin {
+  0%, 100% { box-shadow: 0 0 8px rgba(255, 209, 92, 0.55); }
+  50% { box-shadow: 0 0 20px rgba(255, 209, 92, 0.95); }
+}
+.pin-label {
+  position: absolute;
+  transform: translate(-50%, 0);
+  pointer-events: none;
+  white-space: nowrap;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  color: #ffe8b0;
+  background: rgba(14, 18, 30, 0.82);
+  border: 1px solid rgba(255, 209, 92, 0.45);
+  z-index: 3;
+}
+.pin.me {
+  border-color: #fff;
+  background: var(--gold);
+  color: #22283a;
+  box-shadow: 0 0 14px var(--gold);
+  z-index: 3;
+}
+
+.map-tip {
+  position: absolute;
+  padding: 5px 9px;
+  background: rgba(10, 14, 24, 0.94);
+  border: 1px solid var(--panel-edge);
+  border-radius: 5px;
+  font-size: 12px;
+  pointer-events: none;
+  white-space: nowrap;
+  transform: translate(-50%, -140%);
+  z-index: 4;
+}
+
+/* ========================================================== wish ======== */
+
+.wish-hero {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  background:
+    radial-gradient(ellipse 60% 50% at 50% 42%, rgba(232, 197, 106, 0.22), transparent 70%),
+    linear-gradient(180deg, #1b2138, #2a2233);
+  overflow: hidden;
+}
+
+.wish-hero .halo {
+  position: absolute;
+  width: 60vmin;
+  height: 60vmin;
+  border-radius: 50%;
+  border: 1px solid rgba(232, 197, 106, 0.24);
+  animation: spin 34s linear infinite;
+}
+
+.wish-hero .halo:nth-child(2) { width: 44vmin; height: 44vmin; animation-duration: 22s; animation-direction: reverse; }
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.wish-hero .txt { position: relative; text-align: center; }
+.wish-hero .txt h3 {
+  margin: 0 0 6px;
+  font-size: 26px;
+  font-weight: 300;
+  letter-spacing: 0.22em;
+}
+.wish-hero .txt p { margin: 0; font-size: 12.5px; color: rgba(242, 234, 214, 0.6); letter-spacing: 0.14em; }
+
+.pulls {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  gap: 10px;
+  padding: 4px;
+}
+
+.pull {
+  border-radius: 8px;
+  padding: 12px 8px;
+  text-align: center;
+  border: 1px solid rgba(226, 210, 168, 0.22);
+  animation: pullIn 0.42s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.pull.r5 {
+  background: linear-gradient(170deg, #d8a24a, #6a3f18);
+  border-color: #fff0c0;
+  box-shadow: 0 0 22px rgba(232, 197, 106, 0.55);
+}
+
+.pull.r4 { background: linear-gradient(170deg, #7f66b0, #33294a); border-color: #d8c0ff; }
+.pull.r3 { background: linear-gradient(170deg, #4a6a8e, #24303e); }
+
+.pull .ico { font-size: 30px; }
+.pull .nm { font-size: 12.5px; margin-top: 5px; }
+.pull .tag { font-size: 10.5px; color: rgba(255, 255, 255, 0.7); margin-top: 2px; }
+
+/* Wish change. Warm and dim: it is a consolation line, and on a 3★ card it is the only
+   thing on the card worth reading. */
+.pull .cv {
+  font-size: 10.5px;
+  margin-top: 5px;
+  color: #f2dc9e;
+  text-shadow: 0 0 7px rgba(226, 187, 98, 0.55);
+}
+
+.pull-change {
+  /* `.pulls` is the reveal grid, so the summary line has to claim the whole row rather than
+     sit in a 96px column next to the last card. */
+  grid-column: 1 / -1;
+  margin: 10px 2px 0;
+  font-size: 12px;
+  color: #e9d8a6;
+}
+
+@keyframes pullIn {
+  from { opacity: 0; transform: translateY(20px) scale(0.85) rotate(-4deg); }
+  to { opacity: 1; transform: none; }
+}
+
+/* ======================================================= quest log ====== */
+
+.quest {
+  padding: 11px 12px;
+  border-radius: 7px;
+  border: 1px solid rgba(226, 210, 168, 0.16);
+  background: rgba(0, 0, 0, 0.2);
+  margin-bottom: 9px;
+}
+
+.quest h4 {
+  margin: 0 0 4px;
+  font-size: 14px;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.quest .type {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  padding: 1px 7px;
+  border-radius: 8px;
+  border: 1px solid currentColor;
+  opacity: 0.86;
+}
+
+.quest .type.story { color: var(--gold); }
+.quest .type.side { color: var(--accent); }
+.quest .type.daily { color: #cfe6a0; }
+.quest .type.world { color: #d8b8ff; }
+
+.quest p { margin: 0 0 8px; font-size: 12.5px; color: rgba(242, 234, 214, 0.66); line-height: 1.6; }
+
+.quest .prog {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-num);
+  font-size: 12px;
+  color: rgba(242, 234, 214, 0.8);
+}
+
+.quest .prog .bar { flex: 1; height: 5px; }
+.quest .prog .bar > i { background: linear-gradient(90deg, var(--gold-deep), var(--gold)); }
+
+.quest.done { opacity: 0.55; }
+.quest.done h4::after { content: '✓'; color: var(--hp); }
+
+/* 「目标位置：…」 plus its 「在地图上查看」 button. A flex row rather than inline text: as a
+   paragraph the button sat flush against the last character of the place name. */
+.quest .qwhere {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  margin-top: 4px;
+}
+
+/* Tracked-quest strip on the HUD. */
+.tracker {
+  max-width: 260px;
+  font-size: 12.5px;
+  text-shadow: var(--ink-halo);
+  border-left: 2px solid var(--gold);
+  padding-left: 9px;
+}
+
+.tracker b { display: block; font-weight: 500; color: var(--gold); font-size: 12px; letter-spacing: 0.08em; }
+.tracker span { color: rgba(242, 234, 214, 0.82); }
+
+/* 目标位置: the line that turns '击败 5 只霜狼' into somewhere to walk. The arrow is the only
+   part that moves every frame, so it owns a transform and nothing else does. */
+.qnav {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 3px;
+  font-size: 11.5px;
+  color: rgba(255, 226, 150, 0.92);
+  text-shadow: var(--ink-halo);
+}
+
+.qnav.hidden { display: none; }
+.qnav .qarrow {
+  font-style: normal;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--gold);
+  transform: rotate(var(--rot, 0deg));
+  transition: transform 0.18s linear;
+  filter: drop-shadow(0 0 4px rgba(255, 200, 90, 0.55));
+}
+.qnav em { font-style: normal; color: rgba(255, 232, 176, 0.95); }
+.qnav s { text-decoration: none; color: rgba(226, 210, 168, 0.72); }
+/* No bearing to show: the objective is a zone, a floor or a panel, so the arrow would be a lie. */
+.qnav.far .qarrow { display: none; }
+.qnav.arrived { color: #b9f0c0; }
+.qnav.arrived .qarrow { color: #b9f0c0; }
+
+/* ========================================================= food buffs ==== */
+
+/* One chip per active buff, stacked under the quest tracker. Deliberately small:
+   this is a reminder that a dish is still working, not a stat panel. */
+.buffs {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.buff {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px 3px 5px;
+  border-radius: 14px;
+  background: rgba(12, 16, 26, 0.5);
+  border: 1px solid rgba(214, 176, 100, 0.35);
+  backdrop-filter: blur(3px);
+  width: fit-content;
+  animation: buff-in 0.35s ease both;
+}
+
+@keyframes buff-in {
+  from { opacity: 0; transform: translateX(-10px); }
+  to { opacity: 1; transform: none; }
+}
+
+.buff .ico { font-size: 15px; line-height: 1; filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.7)); }
+.buff .t { display: flex; align-items: baseline; gap: 6px; }
+.buff b { font-size: 11.5px; font-weight: 500; color: var(--gold); letter-spacing: 0.04em; }
+.buff small { font-family: var(--font-num); font-size: 10.5px; color: rgba(242, 234, 214, 0.7); }
+
+/* Gear procs (weapon passives, 4-piece set effects) share the row with food but come
+   and go in seconds rather than minutes, so they read cooler and lighter — a meal is a
+   preparation you chose, a passive firing is the fight telling you it worked. */
+.buff.gear { border-color: rgba(140, 196, 236, 0.4); background: rgba(14, 22, 34, 0.5); }
+.buff.gear b { color: #b7dcf4; }
+
+/* ==================================================== chamber timer ===== */
+
+.chamber {
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  text-align: center;
+  display: none;
+}
+
+.chamber.show { display: block; }
+
+.chamber .clock {
+  font-family: var(--font-num);
+  font-size: 32px;
+  letter-spacing: 0.06em;
+  color: var(--paper);
+  text-shadow: 0 2px 8px #000;
+}
+
+.chamber.urgent .clock { color: #ff9a86; animation: pulse 1s ease-in-out infinite; }
+
+@keyframes pulse { 50% { opacity: 0.55; } }
+
+.chamber .sub {
+  font-size: 12px;
+  letter-spacing: 0.18em;
+  color: rgba(232, 197, 106, 0.86);
+  text-shadow: 0 1px 4px #000;
+}
+
+/* 地脉异常. Violet rather than the timer's gold, and a hair smaller: it is a standing
+   condition on the fight, not a number that is counting down. Empty on floors that have
+   no disorder, so `:empty` has to collapse or the timer sits on a phantom line. */
+.chamber .dis {
+  margin-top: 3px;
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  color: #d9b6ff;
+  text-shadow: 0 1px 4px #000;
+}
+
+.chamber .dis:empty { display: none; }
+
+/* ====================================================== settings ======== */
+
+.setting {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 0;
+  border-bottom: 1px solid rgba(226, 210, 168, 0.10);
+}
+
+.setting label { flex: 1; font-size: 13.5px; }
+.setting small { display: block; color: rgba(242, 234, 214, 0.46); font-size: 11.5px; margin-top: 2px; }
+
+.setting input[type='range'] { flex: 0 0 160px; accent-color: var(--gold); }
+.setting select { flex: 0 0 140px; }
+.setting input[type='checkbox'] { width: 17px; height: 17px; accent-color: var(--gold); }
+
+.setting select {
+  pointer-events: auto;
+  border: 1px solid var(--panel-edge);
+  border-radius: var(--radius);
+  background: rgba(12, 16, 26, 0.9);
+  color: var(--paper);
+  font-size: 13px;
+  padding: 7px 8px;
+  outline: none;
+}
+
+/* -- 操作说明: the control reference, two columns of keys → meaning ------- */
+/*
+   A grid rather than rows of flexbox so every key cap column lines up down the whole table,
+   including across the group headings (which span both columns). Reading a keyboard layout
+   depends on that alignment far more than a list of settings does.
+*/
+.keyref {
+  display: grid;
+  grid-template-columns: minmax(96px, max-content) 1fr;
+  align-items: center;
+  gap: 6px 12px;
+  font-size: 12.5px;
+}
+
+.keyref .kgroup {
+  grid-column: 1 / -1;
+  margin-top: 8px;
+  padding-bottom: 3px;
+  border-bottom: 1px solid rgba(226, 210, 168, 0.12);
+  font-size: 11.5px;
+  letter-spacing: 0.16em;
+  color: rgba(232, 197, 106, 0.72);
+}
+
+.keyref .kgroup:first-child { margin-top: 0; }
+
+.keyref .kk { display: flex; flex-wrap: wrap; gap: 4px; }
+
+.keyref .kcap {
+  min-width: 22px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(242, 234, 214, 0.90);
+  color: #22283a;
+  font-family: var(--font-num);
+  font-weight: 700;
+  font-size: 12px;
+  text-align: center;
+}
+
+/* A mouse gesture is a phrase, not a key cap — same distinction the HUD guide card makes. */
+.keyref .kcap.word {
+  border-radius: 11px;
+  background: rgba(111, 214, 224, 0.14);
+  border: 1px solid rgba(111, 214, 224, 0.45);
+  color: var(--accent);
+  font-family: var(--font);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.keyref .kwhat { color: rgba(242, 234, 214, 0.72); }
+
+/* ==================================================== small screens ===== */
+
+@media (max-width: 860px) {
+  :root { font-size: 14px; }
+  .pcard { width: 152px; }
+  .minimap-wrap { width: 112px; height: 112px; }
+  .hud-bl { width: 56vw; }
+  .skill { width: 52px; height: 52px; }
+  .skill.burst { width: 68px; height: 68px; }
+  .stamina { width: 60px; height: 60px; }
+  .panel .col.side { flex-basis: 170px; }
+}

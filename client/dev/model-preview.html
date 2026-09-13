@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>Model preview</title>
+  <style>
+    html,body{margin:0;height:100%;background:#101018;overflow:hidden}
+    canvas{display:block;width:100vw;height:100vh}
+    #labels{position:fixed;inset:0;pointer-events:none;font:13px/1.2 sans-serif;color:#fff}
+    #labels div{position:absolute;transform:translateX(-50%);text-shadow:0 1px 3px #000}
+  </style>
+</head>
+<body>
+  <canvas id="scene"></canvas>
+  <div id="labels"></div>
+  <script type="module">
+    import * as THREE from 'three';
+    import { Renderer } from '/src/engine/renderer.js';
+    import { buildHumanoid } from '/src/gfx/humanoid.js';
+    import { setToonTime } from '/src/gfx/toon.js';
+    import { CHARACTERS } from '@teyvat/shared/data/characters.js';
+
+    const r = new Renderer(document.getElementById('scene'), 'high');
+    const scene = r.scene;
+    scene.background = new THREE.Color(0x1b2030);
+
+    // lighting
+    // Matches the in-game rig in gfx/sky.js so what we judge here is what ships.
+    const sun = new THREE.DirectionalLight(0xfff2dd, 1.45);
+    sun.position.set(6, 12, 7);
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(2048, 2048);
+    sun.shadow.camera.left = -8; sun.shadow.camera.right = 8;
+    sun.shadow.camera.top = 8; sun.shadow.camera.bottom = -8;
+    sun.shadow.bias = -0.0008;
+    sun.shadow.normalBias = 0.02;
+    scene.add(sun);
+    scene.add(new THREE.HemisphereLight(0x9fc4ff, 0x35402f, 0.45));
+    scene.add(new THREE.AmbientLight(0x8899cc, 0.14));
+
+    const ground = new THREE.Mesh(
+      new THREE.CircleGeometry(30, 48).rotateX(-Math.PI / 2),
+      new THREE.MeshStandardMaterial({ color: 0x4a5a48, roughness: 0.95 }),
+    );
+    ground.receiveShadow = true;
+    scene.add(ground);
+
+    // ?only=id,id  picks a subset;  ?turn=deg  orbits;  ?spread= column pitch
+    const q = new URLSearchParams(location.search);
+    const only = q.get('only')?.split(',').filter(Boolean);
+    const ids = only?.length ? only : Object.keys(CHARACTERS);
+    const spread = Number(q.get('spread') ?? 1.55);
+    const built = [];
+    const labels = document.getElementById('labels');
+    ids.forEach((id, i) => {
+      const def = CHARACTERS[id];
+      const h = buildHumanoid(def);
+      const x = (i - (ids.length - 1) / 2) * spread;
+      h.group.position.set(x, 0, 0);
+      // Characters are authored facing +Z, which is toward the camera already.
+      h.group.rotation.y = THREE.MathUtils.degToRad(Number(q.get('turn') ?? 0));
+      scene.add(h.group);
+      built.push({ h, def, x });
+      const el = document.createElement('div');
+      el.textContent = `${def.name} ${def.body.height}m`;
+      labels.appendChild(el);
+      h.label = el;
+    });
+
+    // Frame the whole row, whatever its width. ?dist / ?at override for close-ups.
+    const dist = Number(q.get('dist') ?? Math.max(2.6, ids.length * spread * 0.72));
+    const at = Number(q.get('at') ?? 0.92);
+    r.camera.position.set(0, at + 0.2, dist);
+    r.camera.lookAt(0, at, 0);
+
+    let t = 0;
+    function loop() {
+      const dt = Math.min(0.05, r.clock.getDelta());
+      t += dt;
+      setToonTime(t);
+      // Gentle idle sway so we can see the rig works.
+      for (const { h } of built) {
+        const b = h.bones;
+        b.spine.rotation.x = Math.sin(t * 1.6) * 0.03;
+        b.chest.rotation.y = Math.sin(t * 1.1) * 0.05;
+        b.head.rotation.y = Math.sin(t * 0.7) * 0.12;
+        b.armL.rotation.x = Math.sin(t * 1.5) * 0.08;
+        b.armR.rotation.x = -Math.sin(t * 1.5) * 0.08;
+      }
+      r.render(dt);
+      // Project labels
+      const v = new THREE.Vector3();
+      for (const { h, x } of built) {
+        v.set(x, h.height + 0.28, 0).project(r.camera);
+        h.label.style.left = `${(v.x * 0.5 + 0.5) * innerWidth}px`;
+        h.label.style.top = `${(-v.y * 0.5 + 0.5) * innerHeight}px`;
+      }
+      requestAnimationFrame(loop);
+    }
+    loop();
+
+    window.__diag = () => ({
+      chars: built.length,
+      drawCalls: r.drawCalls,
+      triangles: r.triangles,
+      fps: r.fps,
+      bones: built[0]?.h.skeleton.bones.length,
+      verts: built[0]?.h.skinned.geometry.attributes.position.count,
+      groups: built[0]?.h.skinned.geometry.groups.length,
+      mats: built[0]?.h.skinned.material.length,
+      glErr: r.renderer.getContext().getError(),
+      programs: r.renderer.info.programs?.length,
+    });
+  </script>
+</body>
+</html>
