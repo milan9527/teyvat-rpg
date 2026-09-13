@@ -9,6 +9,8 @@ uniform vec3  uSunDir;
 uniform vec3  uSunColor;
 uniform vec3  uZenith;
 uniform vec3  uHorizon;
+uniform vec3  uSunsetCol;
+uniform float uGolden;
 uniform vec3  uGroundCol;
 uniform float uTurbidity;
 uniform float uRayleigh;
@@ -49,6 +51,22 @@ void main() {
 
   // Horizon glow opposite the sun keeps the dome from looking flat.
   sky += uHorizon * pow(clamp(1.0 - abs(h), 0.0, 1.0), 6.0) * 0.22;
+
+  // --- the golden hour is a *place* in the sky, not a tint on the whole dome ----
+  // uZenith/uHorizon are functions of height alone, so any warmth they carry is behind you too:
+  // with the sunset written into them the sky at 18:00 was uniformly orange, the anti-sun half
+  // included, and the only thing making the sunward side warmer at all was the Mie halo above.
+  // This is the term that knows where the sun is. Azimuth only — the full 3-D dot would drape the
+  // band over a high sun as well, and it is gated on uGolden, which is 0 for every hour whose sun
+  // is more than ~20 degrees off the horizon (exactly 0 at noon, so the calibrated frames and the
+  // whole cloud block below are untouched).
+  // (No backticks in here: this shader lives in a JS template literal.)
+  if (uGolden > 0.001) {
+    float az = dot(normalize(d.xz + vec2(1e-5)), normalize(L.xz + vec2(1e-5)));
+    float toward = pow(clamp(az * 0.5 + 0.5, 0.0, 1.0), 2.6);
+    float low = pow(clamp(1.0 - max(h, 0.0), 0.0, 1.0), 3.0);
+    sky = mix(sky, uSunsetCol, uGolden * toward * low * 0.9);
+  }
 
   // --- sun disc -----------------------------------------------------------
   float sunAng = acos(clamp(mu, -1.0, 1.0));
@@ -98,7 +116,11 @@ void main() {
     float lit = smoothstep(cover, cover + 0.30, fbm(p2 + toSun, 4));
     float shade = clamp(1.0 - (lit - lo) * 1.6, 0.35, 1.0);
 
-    vec3 cloudLit = mix(vec3(0.92, 0.94, 1.0), uSunColor * 1.15, 0.45);
+    // A deck lit by a sun on the horizon is the most saturated thing in the sky, and at 0.45 of a
+    // near-white base it stayed pale grey while the dome behind it went orange — the clouds were
+    // then what washed the sunset back out. uGolden is 0 at noon, so the calibrated cover is the
+    // same picture it always was.
+    vec3 cloudLit = mix(vec3(0.92, 0.94, 1.0), uSunColor * 1.15, 0.45 + 0.40 * uGolden);
     vec3 cloudDark = mix(vec3(0.42, 0.46, 0.60), uHorizon * 0.8, 0.5);
     vec3 cloud = mix(cloudDark, cloudLit, shade);
     // Silver lining toward the sun.
@@ -264,6 +286,10 @@ export class Sky {
       uSunColor: { value: new THREE.Color(s.sunColor) },
       uZenith: { value: new THREE.Color(s.zenithColor ?? s.ambientSky) },
       uHorizon: { value: new THREE.Color(s.horizonColor ?? s.fogColor) },
+      // The sunset band's colour and how far the sun is into the golden hour. Both start where a
+      // dome with no clock starts: the authored horizon, at zero strength.
+      uSunsetCol: { value: new THREE.Color(s.horizonColor ?? s.fogColor) },
+      uGolden: { value: 0 },
       uGroundCol: { value: new THREE.Color(s.ambientGround) },
       uTurbidity: { value: s.turbidity ?? 8 },
       uRayleigh: { value: s.rayleigh ?? 1.4 },
@@ -376,6 +402,8 @@ export class Sky {
     srgb(u.uSunColor.value, ph.sunColor);
     srgb(u.uZenith.value, ph.zenith);
     srgb(u.uHorizon.value, ph.horizon);
+    srgb(u.uSunsetCol.value, ph.sunsetColor);
+    u.uGolden.value = ph.golden;
     u.uStars.value = ph.stars;
     u.uNight.value = ph.night;
 

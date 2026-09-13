@@ -258,6 +258,19 @@ try {
   const hp0 = await p.evaluate(() => ({ hp: Math.round(window.game.me.hp), max: Math.round(window.game.me.maxHp) }));
   check('...and joined with the hp that buys', hp0.hp > 1500 && hp0.hp === hp0.max, JSON.stringify(hp0));
 
+  // Noon, pinned. The aura captures below are of the character's *body*, and a body is lit by the
+  // sun: `daylight()` moves the DirectionalLight's colour and intensity through the day, so an
+  // unpinned run compares an aura glow against whatever hour the wall clock happened to be in —
+  // and the run that wrote these thresholds happened to be a bright one. `daylight-check` scans
+  // every pixel probe for this line; the alternative it accepts is hiding the canvas, which this
+  // probe cannot do because the canvas is its subject.
+  const pinned = await p.evaluate(() => {
+    const ok = window.game.setWorldTime(12);
+    return { ok, label: window.game.clock.label, pinned: window.game.clock.pinned };
+  });
+  check('the hour is pinned to noon, so the body is lit the way these thresholds were measured',
+    pinned.ok === true && pinned.pinned === true && pinned.label === '12:00', JSON.stringify(pinned));
+
   /**
    * Where a player can be made to react: derived from the zone's own spawn table.
    *

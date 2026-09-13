@@ -158,6 +158,15 @@ export function daylight(sky, dayT) {
   // observable in `sunColor`, which is MOON exactly when it is 1.
   const dark = smooth(-0.02, -0.20, sinElev);
   const stars = smooth(-0.03, -0.26, sinElev);
+  // How bright the dome itself is, as opposed to which colour it is. The two were the same term
+  // until this line existed: the *only* thing that dimmed the sky between noon and sunset was the
+  // mix toward NIGHT_ZENITH/NIGHT_HORIZON, so when that mix was correctly moved off `night` and
+  // onto `dark` (below), 18:00 kept the whole of noon's brightness — zenith lum 185.7 against
+  // noon's 203.2, an afternoon sky with an orange sun pasted in it. Worse, a near-white dome is
+  // where ACES desaturates hardest, so the sunset band could not go warm however much GOLD went
+  // into it (r/b 1.27 against a 1.4 bar). A real sunset sky is a mid-tone: this is that, and
+  // `0.42 + 0.58 = 1` keeps noon exact. Applied *before* the night mix so the two never compound.
+  const domeDim = 0.42 + 0.58 * day;
 
   const zenith0 = hexRgb(sky.zenithColor ?? sky.ambientSky);
   const horizon0 = hexRgb(sky.horizonColor ?? sky.fogColor);
@@ -194,11 +203,32 @@ export function daylight(sky, dayT) {
     // and a channel that reaches 0 across a whole region comes out of the ACES curve as a dead
     // hole with a hard edge. 0.30 + 0.70 = 1 keeps noon exact.
     ambientIntensity: (sky.ambientIntensity ?? 0.9) * (0.30 + 0.70 * day),
-    zenith: mix(mix(zenith0, GOLD, golden * 0.18), NIGHT_ZENITH, night),
-    horizon: mix(mix(horizon0, GOLD, golden * 0.55), NIGHT_HORIZON, night),
+    // The dome's *hue* keys off `dark` — "the sun has set" — and not off `night`. This is the
+    // same defect `stars` had (see the note above it): `night` is 1 - day, and `day` only reaches
+    // 1 at 17.5° of elevation, so `night` is already 0.61 with the sun sitting exactly on the
+    // horizon. Driving the sky colour from it dragged the dome 61% toward midnight blue at the
+    // very moment `golden` peaks at 1.0, and the two mixes cancelled into mud: 18:00 measured
+    // zenith [71,76,98] over horizon [97,71,70], a near-black dome with a hard terrain edge,
+    // where a sunset is the brightest and most saturated sky of the day. Brightness still rides
+    // `day` — that is what `sunIntensity`/`ambientIntensity` are for; what belongs here is only
+    // "which colour", and the answer changes when the sun goes down, not when it gets low.
+    // The isotropic warmth is deliberately small (0.10 / 0.26, down from 0.18 / 0.55). These two
+    // values are the dome's *ring*: a function of height only, identical at every azimuth, so
+    // everything they carry is behind you as well as in front. Pushed hard enough to read as a
+    // sunset, they made the whole sky the same orange — and `daylight-check`'s 「warmer than the
+    // part of the sky facing away from it」 could then only pass on the Mie halo. What a sunset
+    // actually is — a warm band *around the sun*, blue overhead and behind — is direction, so it
+    // lives in the shader, keyed off `golden` and `sunsetColor`. See SKY_FRAG's golden-hour block.
+    zenith: mix(scale(mix(zenith0, GOLD, golden * 0.10), domeDim), NIGHT_ZENITH, dark),
+    horizon: mix(scale(mix(horizon0, GOLD, golden * 0.26), domeDim), NIGHT_HORIZON, dark),
+    // The colour of that band, at full strength. Built from the zone's own horizon so 蒙德's dusk
+    // is warm over its pale blue and 龙脊's over its ice, rather than both landing on GOLD; the
+    // shader is what decides *where* it applies, and at noon `golden` is 0 so it applies nowhere.
+    sunsetColor: mix(mix(horizon0, GOLD, 0.82), NIGHT_HORIZON, dark * 0.6),
     // Fog tracks the far sky. A zone whose fog stays bright while its dome goes dark photographs
     // as an overcast noon at midnight — the same failure as a cave lit by its own fog.
-    fogColor: mix(mix(hexRgb(sky.fogColor), GOLD, golden * 0.45), NIGHT_FOG, night * 0.92),
+    fogColor: mix(scale(mix(hexRgb(sky.fogColor), GOLD, golden * 0.45), 0.55 + 0.45 * day),
+      NIGHT_FOG, dark * 0.92),
   };
 }
 

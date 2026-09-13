@@ -468,6 +468,16 @@ check('the sky is brightest at noon, dimmest at midnight, dusk between',
 check('the ground follows the same ordering',
   noonF.ground.lum > duskF.ground.lum && duskF.ground.lum > nightF.ground.lum,
   `${noonF.ground.lum.toFixed(1)} > ${duskF.ground.lum.toFixed(1)} > ${nightF.ground.lum.toFixed(1)}`);
+// An *interval*, because "dusk between" above is satisfied by a dome one count darker than noon —
+// and that is very nearly what the build did. Moving the dome's hue off `night` and onto `dark`
+// (correctly: `night` is already 0.61 with the sun on the horizon) also removed the only thing that
+// was dimming it, so 18:00 photographed at lum 185.7 against noon's 203.2: an afternoon sky with an
+// orange sun pasted into it, and near-white is exactly where ACES refuses to hold a hue. `domeDim`
+// is the brightness term that replaced the accident; this is the pair of bounds it has to sit in.
+check('黄昏 is a mid-tone sky: clearly darker than noon, still nothing like night',
+  duskF.sky.lum < noonF.sky.lum * 0.75 && duskF.sky.lum > nightF.sky.lum * 4,
+  `dusk ${duskF.sky.lum} vs noon ${noonF.sky.lum} (want < ${(noonF.sky.lum * 0.75).toFixed(0)})`
+  + ` and night ${nightF.sky.lum} (want > ${(nightF.sky.lum * 4).toFixed(0)})`);
 check('and midnight is a big change, not a nudge',
   noonF.sky.lum - nightF.sky.lum > 40 && noonF.ground.lum - nightF.ground.lum > 25,
   `Δsky ${(noonF.sky.lum - nightF.sky.lum).toFixed(1)} Δground ${(noonF.ground.lum - nightF.ground.lum).toFixed(1)}`);
@@ -585,6 +595,38 @@ check('at 黎明 too', warm(sDawn.band) > warm(sNoon.band) * 1.4,
 check('and warmer than the part of the sky facing away from it at the same hour',
   warm(sDusk.band) > warm(duskF.sky) * 1.3,
   `sunward ${warm(sDusk.band).toFixed(2)} vs zenith ${warm(duskF.sky).toFixed(2)}`);
+
+// Which term is doing it — asked the way `uStars` and `uNight` are asked, by taking the suspect out.
+// The assertion above passed for a whole release on a build with *no directional term at all*: the
+// dome's warmth was isotropic and the anti-sun zenith was only cooler because it had been dragged
+// 61% toward midnight blue, so "sunward is warmer than away" was measuring the bug that made the
+// sunset muddy. With the zenith fixed that ratio fell to 1.27/0.90 and this is the term that carries
+// it now, so it gets its own two-sided evidence rather than sharing a threshold with the gradient.
+const withoutGolden = async (h) => {
+  const on = await aimAtSun(h);
+  const was = await p.evaluate(() => {
+    const u = window.game.world.sky.uniforms.uGolden, v = u.value;
+    u.value = 0;
+    window.__dlRender();
+    return v;
+  });
+  await sleep(700);
+  await p.evaluate(() => window.__dlRender());
+  const off = rectStats(await shoot(`nogolden-${String(h).padStart(2, '0')}`), SUNWARD);
+  // Put it back through the product's own path, not by assignment, so the next hour is clean.
+  await p.evaluate((hh) => { window.__dlPin(hh); window.__dlRender(); }, h);
+  return { was, on: on.band, off };
+};
+const gDusk = await withoutGolden(18), gNoon = await withoutGolden(12);
+console.log(`  uGolden: 18:00 ${gDusk.was.toFixed(2)} → 0 turns rgb ${gDusk.on.rgb.join()} into ${gDusk.off.rgb.join()}`
+  + ` (r/b ${warm(gDusk.on).toFixed(2)} → ${warm(gDusk.off).toFixed(2)});`
+  + ` 12:00 ${gNoon.was.toFixed(2)} → 0 turns ${gNoon.on.rgb.join()} into ${gNoon.off.rgb.join()}`);
+check('the warm band is the shader\'s directional term: zeroing uGolden at 黄昏 takes it out',
+  gDusk.was > 0.9 && warm(gDusk.on) > warm(gDusk.off) * 1.35,
+  `r/b ${warm(gDusk.on).toFixed(2)} → ${warm(gDusk.off).toFixed(2)} with uGolden ${gDusk.was.toFixed(2)}`);
+check('and at noon it is already 0, so forcing it is not a change at all',
+  gNoon.was === 0 && gNoon.on.rgb.every((v, i) => Math.abs(v - gNoon.off.rgb[i]) <= 1),
+  `uGolden ${gNoon.was} rgb ${gNoon.on.rgb.join()} vs ${gNoon.off.rgb.join()}`);
 
 /* ------------------------------------------------------------ the HUD's clock -- */
 
