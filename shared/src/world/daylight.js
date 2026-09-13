@@ -167,6 +167,20 @@ export function daylight(sky, dayT) {
   // into it (r/b 1.27 against a 1.4 bar). A real sunset sky is a mid-tone: this is that, and
   // `0.42 + 0.58 = 1` keeps noon exact. Applied *before* the night mix so the two never compound.
   const domeDim = 0.42 + 0.58 * day;
+  // The sun is a *bright* light right up until it touches the horizon; what changes on the way
+  // down is its colour and the length of its shadows. Every brightness curve here used to ride
+  // `day`, which reaches 1 only at 17.5° of elevation and is already down to 0.39 with the sun
+  // sitting exactly on the horizon — while the ambient curve keeps a 30% floor. So the direct
+  // light fell *faster* than the fill through the whole last hour of daylight: the sun/ambient
+  // ratio went 2.94 at noon → 2.88 at 17:00 → 2.16 at 18:00, making the golden hour the flattest
+  // hour of the day instead of the most contrasty one there is. In pixels that was a 17:36 frame
+  // with a median luminance of 51, 76% of it inside ±20% of that median and 1% of it in shadow:
+  // uniform mud, with `groundSunColor` down at [114,63,38] — grass multiplied by a near-black
+  // brown. `up` is "the sun is above the horizon", and holding the beam at 0.86 of full strength
+  // until it is (rather than 1.0) leaves an evening in the evening. Exactly 1 at noon, where
+  // `day` is 1, so every calibrated frame is untouched.
+  const up = smooth(-0.12, 0.03, sinElev);
+  const beam = Math.max(day, 0.86 * up);
 
   const zenith0 = hexRgb(sky.zenithColor ?? sky.ambientSky);
   const horizon0 = hexRgb(sky.horizonColor ?? sky.fogColor);
@@ -191,18 +205,35 @@ export function daylight(sky, dayT) {
     elevation: Math.asin(Math.max(-1, Math.min(1, sinElev))),
     sunColor: lit,
     // 0.055 + 0.945 = 1, so noon is the authored intensity to the last bit.
-    sunIntensity: (sky.sunIntensity ?? 1.6) * (0.055 + 0.945 * day),
+    sunIntensity: (sky.sunIntensity ?? 1.6) * (0.055 + 0.945 * beam),
     // `gfx/terrain.js` uses `uSunColor` as its light term and never multiplies by `sunIntensity`
     // (see the note in 龙脊雪山's sky block — lowering the intensity to dim a blown-out snowfield
     // moved the ground by zero counts). So the ground's dimming has to ride on the colour, and
     // this is the value that goes into the terrain and water shaders.
-    groundSunColor: scale(lit, 0.10 + 0.90 * day),
-    ambientSky: mix(hexRgb(sky.ambientSky), NIGHT_AMB_SKY, night),
-    ambientGround: mix(hexRgb(sky.ambientGround), NIGHT_AMB_GROUND, night),
+    groundSunColor: scale(lit, 0.10 + 0.90 * beam),
+    // The fill is *the sky*, and at sunset the sky is orange from one horizon to the other — so a
+    // fill that stays the zone's daytime blue is a cool light cancelling a warm one, and grey is
+    // what comes out. Measured: a 17:36 frame's median saturation was 0.33 against noon's 0.54,
+    // i.e. the most saturated hour of the day photographed as the least. This is the same defect
+    // as a gold sun on a neutral wall, one step further out: the light that fills the shadows has
+    // to be the colour of the thing filling them. The ground bounce is warmed less than the sky
+    // (0.25 vs 0.45) because it is the terrain's own colour coming back up, not the dome's.
+    // …and the night mix rides `dark`, not `night`, for the reason spelled out at `zenith` below:
+    // `night` is already 0.61 with the sun sitting on the horizon, so it dragged the fill 61% of
+    // the way to midnight blue at the moment `golden` is 1. That is not a small effect — the two
+    // zones whose authored fill is already warm came out of it *cooler* at dusk than at noon
+    // (璃月港 r/b 1.52 → 1.29, 黄金屋 1.75 → 1.29): a sunset whose shadows fill bluer than midday's.
+    // Colour changes when the sun sets; brightness changes as it falls, and that is the line above.
+    ambientSky: mix(mix(hexRgb(sky.ambientSky), GOLD, golden * 0.45), NIGHT_AMB_SKY, dark),
+    ambientGround: mix(mix(hexRgb(sky.ambientGround), GOLD, golden * 0.25), NIGHT_AMB_GROUND, dark),
     // Never scaled to zero: the ambient floor is the only thing keeping a night ground off 0,
     // and a channel that reaches 0 across a whole region comes out of the ACES curve as a dead
     // hole with a hard edge. 0.30 + 0.70 = 1 keeps noon exact.
-    ambientIntensity: (sky.ambientIntensity ?? 0.9) * (0.30 + 0.70 * day),
+    // …and the other half of the golden hour's contrast: the fill *drops* while the beam holds.
+    // A low sun means a small, hard, very directional source and a sky that has stopped bouncing
+    // much into the shadows, which is why evening light models a face and midday light does not.
+    // `golden` is exactly 0 at noon, so this factor is exactly 1 there.
+    ambientIntensity: (sky.ambientIntensity ?? 0.9) * (0.30 + 0.70 * day) * (1 - 0.30 * golden),
     // The dome's *hue* keys off `dark` — "the sun has set" — and not off `night`. This is the
     // same defect `stars` had (see the note above it): `night` is 1 - day, and `day` only reaches
     // 1 at 17.5° of elevation, so `night` is already 0.61 with the sun sitting exactly on the

@@ -211,6 +211,55 @@ for (const id of ZONE_IDS) {
   check(`${id}: 黄昏's light is warmer than noon's and midnight's is cooler`,
     warmth(dusk) > warmth(noon) * 1.15 && warmth(mid) < warmth(noon),
     `r/b noon ${warmth(noon).toFixed(2)} dusk ${warmth(dusk).toFixed(2)} night ${warmth(mid).toFixed(2)}`);
+
+  // ---- the golden hour is the most contrasty hour of the day ----------------------
+  //
+  // Contrast, in the units the ground is actually shaded in: the light that reaches a lit face
+  // (`groundSunColor`, which *is* the terrain shader's light term) over the light that fills a
+  // shaded one (the hemisphere mix, times its intensity). The weights are the shader's own — see
+  // `amb = mix(uAmbGround, uAmbSky, N.y * 0.5 + 0.5)` in gfx/terrain.js, mostly sky for ground
+  // that faces up.
+  //
+  // This is the metric that names the defect this round found. Every brightness curve here used to
+  // ride `day`, which is already down to 0.39 with the sun sitting on the horizon, while the fill
+  // kept a 30% floor — so in 蒙德 the ground's own sun light fell from 235,187,152 at 17:00 to
+  // 114,63,38 at 18:00 and the ratio went *below noon's*: 1.73 at midday, 1.64 at 17:00. The most
+  // contrasty hour there is photographed flatter than the flattest one, which is most of what
+  // 「不真实」 was: a 17:36 frame whose land sat 83% inside ±20% of its own median.
+  const lumOf = (c) => 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
+  const fillOf = (p) => (lumOf(p.ambientSky) * 0.65 + lumOf(p.ambientGround) * 0.35) * p.ambientIntensity;
+  const contrast = (p) => lumOf(p.groundSunColor) / fillOf(p);
+  const upHours = day.filter((p) => p.elevation >= 0);
+  const flattest = upHours.reduce((a, p) => (contrast(p) < contrast(a) ? p : a));
+  // The sharp form of it, and the one a future edit will trip over first: while the sun is above
+  // the horizon the light is never flatter than midday. Midday is the minimum, exactly — every
+  // hour on the way down trades fill for beam. The pre-fix curves scored 0.95 here.
+  if (!ZONES[id].indoor) {
+    check(`${id}: no hour with the sun up is flatter than midday`,
+      contrast(flattest) >= contrast(noon) - 1e-9,
+      `flattest ${flattest.label} ${contrast(flattest).toFixed(3)} vs noon ${contrast(noon).toFixed(3)}`);
+  }
+  const peak = day.reduce((a, p) => (contrast(p) > contrast(a) ? p : a));
+  check(`${id}: and the most contrasty light of the day is a low sun`,
+    peak.golden > 0.9 && contrast(peak) > contrast(noon) * 1.15,
+    `peak ${peak.label} ${contrast(peak).toFixed(2)} (golden ${peak.golden.toFixed(2)})`
+    + ` vs noon ${contrast(noon).toFixed(2)}`);
+  // Bounded from the other side, because "more contrasty" is also what a collapsing beam looks
+  // like: 114,63,38 over a dark fill is a high ratio and a mud-coloured picture. The ratio has to
+  // rise because the *fill* drops, with the beam still most of a full sun. Pre-fix: 0.31.
+  check(`${id}: because the fill drops, not because the sun went out`,
+    lumOf(peak.groundSunColor) > lumOf(noon.groundSunColor) * 0.45
+    && fillOf(peak) < fillOf(noon) * 0.65,
+    `beam ${(lumOf(peak.groundSunColor) / lumOf(noon.groundSunColor)).toFixed(2)}×`
+    + ` fill ${(fillOf(peak) / fillOf(noon)).toFixed(2)}× of noon`);
+  // And the fill is the *colour of the sky it comes from*. Same defect as the dome's hue, one term
+  // over: driving the night mix off `night` dragged the fill 61% toward midnight blue at 18:00, so
+  // the two zones with an already-warm authored fill came out cooler at sunset than at midday.
+  const fillWarm = (p) => p.ambientSky[0] / p.ambientSky[2];
+  check(`${id}: the light filling the shadows warms at 黄昏 and cools after dark`,
+    fillWarm(dusk) > fillWarm(noon) * 1.35 && fillWarm(mid) < fillWarm(noon),
+    `fill r/b noon ${fillWarm(noon).toFixed(2)} dusk ${fillWarm(dusk).toFixed(2)}`
+    + ` night ${fillWarm(mid).toFixed(2)}`);
 }
 
 console.log('\n=== naming the time of day');
@@ -367,12 +416,18 @@ const boot = await p.evaluate(() => {
   // within about ten metres). The player is behind the camera, so the middle of the frame is world
   // rather than avatar. Both rects are then *validated* at noon below, because a framing claim
   // nobody checks is how the first run measured a hedge and called it a sunset.
-  const me = g.me, cam = g.camera, yaw = 0.6, up = Math.tan(5 * Math.PI / 180) * 30;
-  cam.fov = 55;
-  cam.position.set(me.x, me.y + 3.0, me.z);
-  cam.lookAt(me.x + Math.sin(yaw) * 30, me.y + 3.0 + up, me.z + Math.cos(yaw) * 30);
-  cam.updateProjectionMatrix();
-  cam.updateMatrixWorld(true);
+  // A function, not a one-off, because `aimAtSun` below moves the camera 90 m up: anything shot
+  // after it that means to talk about the *ground* has to put this framing back, and a second copy
+  // of the numbers is a second thing to keep in step with the rects.
+  window.__dlFrame = () => {
+    const me = g.me, cam = g.camera, yaw = 0.6, up = Math.tan(5 * Math.PI / 180) * 30;
+    cam.fov = 55;
+    cam.position.set(me.x, me.y + 3.0, me.z);
+    cam.lookAt(me.x + Math.sin(yaw) * 30, me.y + 3.0 + up, me.z + Math.cos(yaw) * 30);
+    cam.updateProjectionMatrix();
+    cam.updateMatrixWorld(true);
+  };
+  window.__dlFrame();
   // The HUD and the world overlay are DOM over the canvas. Hidden for world shots so the clock
   // widget's own pixels cannot show up in a "did the world change" diff — the widget is measured
   // separately, with the HUD back on.
@@ -627,6 +682,107 @@ check('the warm band is the shader\'s directional term: zeroing uGolden at 黄�
 check('and at noon it is already 0, so forcing it is not a change at all',
   gNoon.was === 0 && gNoon.on.rgb.every((v, i) => Math.abs(v - gNoon.off.rgb[i]) <= 1),
   `uGolden ${gNoon.was} rgb ${gNoon.on.rgb.join()} vs ${gNoon.off.rgb.join()}`);
+
+/* ------------------------- the golden hour, photographed as the contrasty one -- */
+
+// The numeric gates above say the sun/fill ratio peaks at a low sun. This is the same claim in
+// pixels, because a ratio between two uniforms is not a picture: what 「画质很不真实」 looks like on
+// screen is a *tonally uniform* frame, one flat mid-tone over the whole valley.
+//
+// The metric is the share of the land inside ±20% of the land's own median luminance. Relative to
+// the median on purpose — an hour that is simply darker must not score as a flatter one, which is
+// exactly the mistake a mean or a std would make here. Measured on the framing set at boot (the
+// camera has to be put back: `aimAtSun` left it 90 m up).
+console.log('\n=== and the same claim in pixels: a low sun is a contrasty picture');
+const LAND = { x: 40, y: 294, w: 920, h: 385 };
+const landSpread = (img) => {
+  const { width, data } = img;
+  const lum = [];
+  for (let y = LAND.y; y < LAND.y + LAND.h; y++) {
+    for (let x = LAND.x; x < LAND.x + LAND.w; x += 2) {
+      const i = (y * width + x) * 4;
+      lum.push(0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2]);
+    }
+  }
+  lum.sort((a, b) => a - b);
+  const med = lum[Math.floor(lum.length / 2)];
+  return {
+    med: +med.toFixed(1),
+    band: +(lum.filter((v) => Math.abs(v - med) < med * 0.20).length / lum.length).toFixed(3),
+  };
+};
+// 17:36 rather than 18:00: at 18:00 the sun is exactly on the horizon and the whole valley is
+// grazing light, which is a different (and much rarer) picture than the golden hour itself.
+const landAt = async (h, file) => {
+  await p.evaluate((hh) => { window.__dlFrame(); window.__dlPin(hh); }, h);
+  await sleep(900);
+  await p.evaluate(() => window.__dlRender());
+  return landSpread(await shoot(file));
+};
+const landNoon = await landAt(12, 'land-1200');
+const landGold = await landAt(17.6, 'land-1736');
+console.log(`  land: 12:00 median ${landNoon.med}, ${(landNoon.band * 100).toFixed(0)}% of it within ±20%`
+  + ` | 17:36 median ${landGold.med}, ${(landGold.band * 100).toFixed(0)}%`);
+// A loose bar on purpose, and it is worth saying what it does *not* do: this number moved from
+// 0.636 to 0.705 between two runs of the same build — the loop is stopped, but the grass is left at
+// whatever phase the wind blew it to, and the weather is re-rolled on every pin (this run happened
+// to land on dim 1.0) — so it cannot carry a tight threshold. What it catches is a golden hour that
+// photographs as flat as midday, which is the defect this round started from. The term
+// that produces the difference is pinned by the mutation below, which does not depend on the hour
+// comparison at all.
+check('the golden hour does not photograph as flat as midday',
+  landGold.band < landNoon.band * 0.95, `band ${landGold.band} vs noon ${landNoon.band}`);
+
+// Which term does it — and the one hour where the answer has to be "none of them". `groundSunColor`
+// used to ride `day` and the fill kept full strength through the golden hour; both values are
+// recomputed here from the *current* phase and written back through the terrain's own uniforms, so
+// the mutation is the change this round made and nothing else. At noon `day` is 1 and `golden` is 0,
+// so the pre-fix expressions evaluate to the values already in those uniforms and the frame must
+// come back bit-identical — which is the noon identity, asserted in pixels instead of in floats.
+const prefixLand = async (h, file) => {
+  const sky = ZONES.mondstadt.sky;
+  const ph = daylight(sky, dayTFromHours(h));
+  const old = {
+    sun: ph.sunColor.map((v) => v * (0.10 + 0.90 * ph.day)),   // was `day`, is now `beam`
+    ambInt: ph.ambientIntensity / (1 - 0.30 * ph.golden),      // the fill kept its full strength
+  };
+  await p.evaluate((hh) => { window.__dlFrame(); window.__dlPin(hh); }, h);
+  await sleep(900);
+  await p.evaluate(() => window.__dlRender());
+  const before = await shoot(`${file}-now`);
+  const landed = await p.evaluate((o) => {
+    const w = window.game.world, u = w.terrain.uniforms;
+    const was = u.uSunColor.value.getHexString();
+    // The weather's `dim` multiplies this uniform after the daylight does (a storm has to darken
+    // the ground the sun colour lights, not the DirectionalLight nobody reads), so the mutation
+    // has to carry it or a cloudy pin would read as a difference this round caused.
+    u.uSunColor.value.setRGB(o.sun[0], o.sun[1], o.sun[2], 'srgb').multiplyScalar(w._dim);
+    u.uAmbInt.value = o.ambInt;
+    window.__dlRender();
+    return { was, now: u.uSunColor.value.getHexString(), dim: +w._dim.toFixed(3) };
+  }, old);
+  await sleep(300);
+  await p.evaluate(() => window.__dlRender());
+  const after = await shoot(`${file}-prefix`);
+  await p.evaluate((hh) => { window.__dlPin(hh); window.__dlRender(); }, h);   // restore
+  return { landed, on: landSpread(before), off: landSpread(after), moved: pixelsDiffering(before, after) };
+};
+const pxGold = await prefixLand(17.6, 'prefix-1736');
+const pxNoon = await prefixLand(12, 'prefix-1200');
+console.log(`  17:36 terrain sun #${pxGold.landed.was} → #${pxGold.landed.now} (weather dim ${pxGold.landed.dim}):`
+  + ` median ${pxGold.on.med} → ${pxGold.off.med}, band ${pxGold.on.band} → ${pxGold.off.band},`
+  + ` ${pxGold.moved} px moved; 12:00 #${pxNoon.landed.was} → #${pxNoon.landed.now}, ${pxNoon.moved} px`);
+// Brightness, not spread: the mutation only moves the land's uniformity by 2-3% (the cel ramp and
+// the ambient add flatten it either way — that is a separate defect, see 已知限制), while it takes
+// 7% off the median of the lit ground over 70% of the frame. So this asserts what the term does do,
+// which is keep the sun a sun until it sets.
+check('putting the ground back on the pre-fix light darkens the sunlit land again',
+  pxGold.landed.was !== pxGold.landed.now && pxGold.moved > 200000
+  && pxGold.off.med < pxGold.on.med * 0.95,
+  `median ${pxGold.on.med} → ${pxGold.off.med}, ${pxGold.moved} px moved`);
+check('and at noon the pre-fix expressions are the same numbers, so the frame does not move',
+  pxNoon.landed.was === pxNoon.landed.now && pxNoon.moved < 200,
+  `#${pxNoon.landed.was} → #${pxNoon.landed.now}, ${pxNoon.moved} px of ${W * H}`);
 
 /* ------------------------------------------------------------ the HUD's clock -- */
 
