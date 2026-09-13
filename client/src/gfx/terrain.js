@@ -37,12 +37,17 @@ varying vec4 vSplat;
 attribute vec4 splat;
 attribute float aoBake;
 varying float vAO;
+varying float vFogDepth;
 
 void main() {
   vSplat = splat;
   vAO = aoBake;
   vec4 wp = modelMatrix * vec4(position, 1.0);
   vWorld = wp.xyz;
+  // The same quantity three.js's own fog uses (fog_vertex is vFogDepth = -mvPosition.z), and
+  // not length(cameraPosition - vWorld): the ground and the props standing on it have to be in
+  // one atmosphere, and view depth against radial distance is a 13% disagreement at a frame edge.
+  vFogDepth = -(viewMatrix * wp).z;
   vNrm = normalize(mat3(modelMatrix) * normal);
   vSlope = 1.0 - vNrm.y;
   vHeight = wp.y;
@@ -66,8 +71,7 @@ uniform vec3  uAmbSky;
 uniform vec3  uAmbGround;
 uniform float uAmbInt;
 uniform vec3  uFogColor;
-uniform float uFogNear;
-uniform float uFogFar;
+uniform float uFogDensity;
 uniform float uTime;
 uniform float uWaterLevel;
 uniform vec3  uWaterColor;
@@ -93,6 +97,7 @@ varying float vSlope;
 varying float vHeight;
 varying vec4 vSplat;
 varying float vAO;
+varying float vFogDepth;
 
 // --- cheap value noise (hash based) ----------------------------------------
 float hash21(vec2 p) {
@@ -552,7 +557,16 @@ void main() {
   col += uSunColor * sp * gloss * gloss * 0.5 * shadowAtten;
 
   // ---- fog ---------------------------------------------------------------
-  float fog = smoothstep(uFogNear, uFogFar, camD);
+  // Exponential-squared, the same expression and the same density three.js gives every other
+  // object in the scene (fog_fragment: 1 - exp(-density^2 * depth^2)). The ground used to have
+  // its own linear window instead — smoothstep(fogNear*2.2, fogFar*2.4, camD) — and the two
+  // atmospheres did not agree: at 蒙德's noon that window opened at 198 m, which 0 of 315 sight
+  // lines ever reached, so a tree 200 m out was 9.7% hazed while the hillside it stood on was
+  // 0.0%, and the same grass at 3 m and 140 m photographed identically (lum 126.2 vs 130.2).
+  // Nor did the window move with the weather, so a 龙脊 blizzard erased props 89% at 150 m over
+  // ground at 2.7%: a whiteout with a hard green floor showing through it.
+  float fogD = uFogDensity * vFogDepth;
+  float fog = 1.0 - exp(-fogD * fogD);
   // Aerial perspective: distant terrain shifts toward the sky colour and desaturates.
   float lum = dot(col, vec3(0.299, 0.587, 0.114));
   col = mix(col, mix(col, vec3(lum), 0.35), fog * 0.6);
@@ -609,8 +623,11 @@ export class Terrain {
       uAmbGround: { value: new THREE.Color(sky.ambientGround) },
       uAmbInt: { value: sky.ambientIntensity },
       uFogColor: { value: new THREE.Color(sky.fogColor) },
-      uFogNear: { value: sky.fogNear * 2.2 },
-      uFogFar: { value: sky.fogFar * 2.4 },
+      // The zone's own `fogDensity`, unscaled — the same number `gfx/sky.js` hands to
+      // `THREE.FogExp2`, so the ground is in the same air as everything standing on it. It is
+      // also the reason `applyWeather` below exists: `sky.js` moves the scene fog's density when
+      // the weather turns, and one atmosphere means this one has to move with it.
+      uFogDensity: { value: sky.fogDensity ?? 0.008 },
       uWaterLevel: { value: zone.water?.level ?? -999 },
       uWaterColor: { value: new THREE.Color(zone.water?.color ?? 0x2a6f8f) },
       uColA: { value: cols[0] },
@@ -684,6 +701,20 @@ export class Terrain {
     srgbInto(u.uAmbGround.value, ph.ambientGround);
     u.uAmbInt.value = ph.ambientIntensity;
     srgbInto(u.uFogColor.value, ph.fogColor);
+  }
+
+  /**
+   * Weather. The only thing in it the ground reads is how thick the air is, and it has to read it
+   * for the same reason `applyDaylight` exists: the ground is not in `scene.fog`, so a rainstorm
+   * that only moved `FogExp2.density` thickened the air around every tree, rock and character and
+   * left the hillside behind them at fair-weather clarity. Measured before this line: a 龙脊
+   * blizzard hid props 89% at 150 m over ground that was 2.7% hazed.
+   *
+   * `weatherAt` multiplies the zone's authored `fogDensity` (blizzard ×2.40, rain ×1.85), so on a
+   * clear day this writes back exactly the value the constructor did.
+   */
+  applyWeather(w) {
+    this.uniforms.uFogDensity.value = w.fogDensity;
   }
 
   /** Build one chunk's geometry at a given LOD. */
@@ -822,6 +853,7 @@ uniform float uWaveScale;
 varying vec3 vWorld;
 varying vec2 vUvW;
 varying float vWave;
+varying float vFogDepth;
 
 float wave(vec2 p, vec2 dir, float freq, float speed, float t) {
   return sin(dot(p, dir) * freq + t * speed);
@@ -841,6 +873,8 @@ void main() {
   vWave = h;
   vWorld = wp.xyz;
   vUvW = wp.xz * 0.05;
+  // View depth, matching three.js's own fog varying — see the note in TERRAIN_VERT.
+  vFogDepth = -(viewMatrix * wp).z;
   gl_Position = projectionMatrix * viewMatrix * wp;
 }
 `;
@@ -854,11 +888,11 @@ uniform vec3 uFoam;
 uniform vec3 uSunDir;
 uniform vec3 uSunColor;
 uniform vec3 uFogColor;
-uniform float uFogNear;
-uniform float uFogFar;
+uniform float uFogDensity;
 varying vec3 vWorld;
 varying vec2 vUvW;
 varying float vWave;
+varying float vFogDepth;
 
 float hash21(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
 float vnoise(vec2 p) {
@@ -896,8 +930,9 @@ void main() {
   // Sky-ish fresnel brighten near the horizon.
   col += uColor * fres * 0.35;
 
-  float dist = length(cameraPosition - vWorld);
-  col = mix(col, uFogColor, smoothstep(uFogNear, uFogFar, dist));
+  // Same air as the ground and the props — see the note in TERRAIN_FRAG's fog block.
+  float fogD = uFogDensity * vFogDepth;
+  col = mix(col, uFogColor, 1.0 - exp(-fogD * fogD));
 
   float alpha = mix(0.78, 0.97, fres);
   gl_FragColor = vec4(col, alpha);
@@ -923,8 +958,7 @@ export function makeWater(zone) {
       uSunDir: { value: new THREE.Vector3(...sky.sunDir).normalize() },
       uSunColor: { value: new THREE.Color(sky.sunColor) },
       uFogColor: { value: new THREE.Color(sky.fogColor) },
-      uFogNear: { value: sky.fogNear * 2.2 },
-      uFogFar: { value: sky.fogFar * 2.4 },
+      uFogDensity: { value: sky.fogDensity ?? 0.008 },
     },
     vertexShader: WATER_VERT,
     fragmentShader: WATER_FRAG,
@@ -944,5 +978,6 @@ export function makeWater(zone) {
     if (dim !== 1) mat.uniforms.uSunColor.value.multiplyScalar(dim);
     srgbInto(mat.uniforms.uFogColor.value, ph.fogColor);
   };
+  mesh.applyWeather = (w) => { mat.uniforms.uFogDensity.value = w.fogDensity; };
   return mesh;
 }

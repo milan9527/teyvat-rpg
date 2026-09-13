@@ -44,7 +44,7 @@ export const ZONES = {
     sky: {
       sunDir: [0.42, 0.72, 0.35], sunColor: 0xfff2d8, sunIntensity: 2.5,
       ambientSky: 0x9fc8ff, ambientGround: 0x6b7a4a, ambientIntensity: 0.85,
-      fogColor: 0xc8ddf0, fogNear: 90, fogFar: 460, fogDensity: 0.0016,
+      fogColor: 0xc8ddf0, fogDensity: 0.0016,
       rayleigh: 1.4, turbidity: 3.2, exposure: 1.0,
     },
     terrain: {
@@ -178,7 +178,7 @@ export const ZONES = {
       // measurement that proved it: near-ground rgb [189,206,224] before and after.
       sunDir: [0.28, 0.55, -0.5], sunColor: 0xd8e8ff, sunIntensity: 1.9,
       ambientSky: 0xcfe4ff, ambientGround: 0x8fa8c0, ambientIntensity: 1.05,
-      fogColor: 0xd6e4f2, fogNear: 40, fogFar: 300, fogDensity: 0.0042,
+      fogColor: 0xd6e4f2, fogDensity: 0.0042,
       // 0.58, and this is the number that made the zone readable. `sky.exposure` was authored
       // on all six zones and read by nobody until `Renderer#setExposure`; at the 1.05 written
       // here the snowfield measured rgb [192,209,227] p5..p95 204..213 — a 9-count band holding
@@ -321,7 +321,7 @@ export const ZONES = {
     sky: {
       sunDir: [-0.35, 0.62, 0.5], sunColor: 0xffe6b8, sunIntensity: 2.7,
       ambientSky: 0xffd8a8, ambientGround: 0x7a6a48, ambientIntensity: 0.9,
-      fogColor: 0xf0dcb8, fogNear: 80, fogFar: 520, fogDensity: 0.0018,
+      fogColor: 0xf0dcb8, fogDensity: 0.0018,
       rayleigh: 1.1, turbidity: 4.5, exposure: 1.08,
     },
     terrain: {
@@ -405,7 +405,7 @@ export const ZONES = {
       // braziers and the rune inlay carry the rest.
       sunDir: [0.1, 0.94, 0.2], sunColor: 0x9fb0e8, sunIntensity: 0.8,
       ambientSky: 0x46467e, ambientGround: 0x22223a, ambientIntensity: 0.85,
-      fogColor: 0x14142a, fogNear: 20, fogFar: 140, fogDensity: 0.013,
+      fogColor: 0x14142a, fogDensity: 0.013,
       rayleigh: 0.3, turbidity: 12, exposure: 1.2,
       vaultColor: 0x241f42, vaultGlow: 0x7a5ad0,
     },
@@ -545,7 +545,7 @@ export const ZONES = {
       // 0x2c3f52 is the same cold hue at luma 60, i.e. 0.78 of the vault — the ratio the
       // two dungeons that already read as interiors have (深渊 0.62, 黄金屋 0.73), and now
       // a rule in zoneGate.js rather than three independent judgements.
-      fogColor: 0x2c3f52, fogNear: 15, fogFar: 130, fogDensity: 0.013,
+      fogColor: 0x2c3f52, fogDensity: 0.013,
       rayleigh: 1.0, turbidity: 8, exposure: 1.1,
       vaultColor: 0x3e5064, vaultGlow: 0x8fd8ff,
     },
@@ -644,7 +644,7 @@ export const ZONES = {
       // Desaturated on purpose: a fully gold ambient painted the stone walls the same
       // orange as the floor, so the room had one colour and no depth.
       ambientSky: 0x9a8558, ambientGround: 0x3a2a18, ambientIntensity: 0.8,
-      fogColor: 0x3e2a16, fogNear: 18, fogFar: 150, fogDensity: 0.012,
+      fogColor: 0x3e2a16, fogDensity: 0.012,
       rayleigh: 0.8, turbidity: 10, exposure: 1.12,
       vaultColor: 0x453c30, vaultGlow: 0xff9a4c,
     },

@@ -270,6 +270,14 @@ const SPEC = [
   // title), `.dmg`/`.dmg.crit`'s soft drops left the pixel beside a stroke at ~80 % of a bright
   // body, and `.wlabel`'s single 4 px blur was too weak on noon meadow.
   { name: 'legible-check', group: 'visual', needs: 'browser', timeout: 20 * MIN, args: ['--out', `${runDir}/art-legible-check`] },
+  // The aura the player is wearing — element pips, the reaction flash, the frozen shell — shot
+  // against the character rather than against the frame, because "something changed" is what a
+  // reaction looks like anywhere on screen. It takes its out dir as a bare path, not `--out`.
+  // Registered late: it was committed without a row, so the "no probe on disk goes unnamed" gate
+  // below was refusing to run the whole suite, and the probe itself had never run in one. It is
+  // red at 45/6/2 as registered, all six about *where* the aura is drawn (its centre is 6.6 m from
+  // the character's own projection) — a defect this row exists to keep visible, not to hide.
+  { name: 'player-aura-check', group: 'visual', needs: 'browser', timeout: 30 * MIN, args: [`${runDir}/art-player-aura`] },
   // No screenshots and no tier: it marches rigs and reads bone matrices, so it is the one
   // motion probe that cannot be fooled by a stale frame.
   { name: 'gait-check', group: 'browser', needs: 'browser', timeout: 10 * MIN },

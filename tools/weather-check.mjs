@@ -411,6 +411,59 @@ await p.evaluate(() => {
     cam.updateProjectionMatrix();
     cam.updateMatrixWorld(true);
   };
+  // A vista: 24 m up and 7.4° down, which is the only camera in this probe that holds ground at
+  // arm's length *and* ground 200 m out in the same frame. Aerial perspective is a claim about two
+  // distances, so it cannot be measured from a camera that only has one.
+  window.__wxVista = (yaw) => {
+    const me = g.me, cam = g.camera, eye = me.y + 24;
+    cam.fov = 55;
+    cam.position.set(me.x, eye, me.z);
+    cam.lookAt(me.x + Math.sin(yaw) * 200, eye - 26, me.z + Math.cos(yaw) * 200);
+    cam.updateProjectionMatrix();
+    cam.updateMatrixWorld(true);
+  };
+  // What a rect is actually looking at: five rays through it, each answering "how far, and is it
+  // the ground?". The terrain is chunked meshes sharing one material, so the subject is identified
+  // by `material ===` and not by object identity. The sky dome and the *precipitation mesh* are
+  // both skipped — a ray through a rainstorm otherwise hits a raindrop 2 m from the lens and
+  // reports the distant hillside as a 2.1 m prop, which is exactly what the first run of this
+  // measurement did.
+  window.__wxRectSubject = async (r, vw, vh) => {
+    const THREE = await import('/node_modules/three/build/three.module.js');
+    const out = [];
+    for (const [fx, fy] of [[0.25, 0.3], [0.75, 0.3], [0.25, 0.7], [0.75, 0.7], [0.5, 0.5]]) {
+      const ndcX = ((r.x + r.w * fx) / vw) * 2 - 1, ndcY = 1 - ((r.y + r.h * fy) / vh) * 2;
+      const ray = g._pointerRay({ ndcX, ndcY });
+      const rc = new THREE.Raycaster(); rc.ray.copy(ray.ray || ray); rc.far = 1e6;
+      const hit = rc.intersectObjects(g.scene.children, true).find((h) => h.object !== g.world.sky.mesh
+        && h.object !== g.world.weather.mesh && h.object.visible && h.distance > 0.5);
+      out.push(hit ? { d: +hit.distance.toFixed(1), t: hit.object.material === g.world.terrain.material } : null);
+    }
+    return out;
+  };
+  // The precipitation, taken out of the frame. The atmosphere section below measures the *ground's*
+  // air at two depths, and 4000 additive snow points falling through the near rect move that rect's
+  // own saturation by tens of percent between two otherwise identical frames — a wander much wider
+  // than the ~2% the fog itself puts there at 38 m, which made a true reading unmeasurable. So those
+  // readings are taken with the snow hidden. That the snow is drawn at all is a different claim,
+  // made by the hide-the-rain section against its own measured floor.
+  window.__wxPrecip = (on) => {
+    const m = g.world.weather.mesh;
+    if (!m) return null;
+    const was = m.visible;
+    m.visible = on;
+    return was;
+  };
+  // The three places the air's density lives. They are three because the renderer only fogs the
+  // meshes it owns the material of: the ground and the water fog themselves in their own shaders.
+  window.__wxFog = () => ({
+    ground: +g.world.terrain.uniforms.uFogDensity.value.toFixed(6),
+    scene: g.scene.fog ? +g.scene.fog.density.toFixed(6) : -1,
+    water: g.world.water ? +g.world.water.material.uniforms.uFogDensity.value.toFixed(6) : null,
+    // The colour the air is, in the same 8-bit sRGB the screenshots are read in — `getHexString()`
+    // converts out of three's working space, which the raw `.r/.g/.b` would not.
+    fogHex: g.scene.fog ? g.scene.fog.color.getHexString() : null,
+  });
   window.__wxAim = (yaw) => {
     // Head height, 5° up: the top of the frame is sky (where cloudiness lives), the bottom is
     // ground within ten metres, and the middle is the 44 m particle box the storm falls inside.
@@ -456,7 +509,17 @@ await p.evaluate(async () => {
 });
 await p.evaluate(() => { const g = window.game; g.stop(); window.__wxAim(0.6); });
 
+// Render, wait a beat, render again, *then* capture. A screenshot returns the last frame the
+// browser's compositor has, which is not necessarily the last one WebGL drew — so a single render
+// after a camera move can be missed entirely and the shot is of the previous camera. That is not
+// hypothetical: the dome section below moves to a camera 150 m up, and for as long as this probe has
+// existed its first shot was silently the *walking* camera's frame. It passed anyway, because the
+// band it measures happened to be sky in both, and it only started failing when a fog change
+// repainted the hillside that was in the rect. Two renders and 250 ms per shot removes the class.
 const shoot = async (file) => {
+  await p.evaluate(() => window.__wxRender());
+  await sleep(250);
+  await p.evaluate(() => window.__wxRender());
   await p.screenshot({ path: `${outDir}/${file}.png` });
   return decodePng(fs.readFileSync(`${outDir}/${file}.png`));
 };
@@ -556,6 +619,220 @@ check('the rain is drawn as clamped, non-additive streaks',
   `ceiling ${rain.st.maxPx} px, additive ${rain.st.additive}`);
 check('so a meadow behind a downpour does not gain a white blowout',
   rain.mid.p95 - clear.mid.p95 < 40, `p95 ${clear.mid.p95} → ${rain.mid.p95}`);
+
+/* ----------------------------------------- one atmosphere: the ground is in the same air -- */
+
+// This section exists because for most of the project the world had **two** atmospheres. Props,
+// grass and characters were in `scene.fog` — a `THREE.FogExp2` whose density is the zone's own and
+// which this file's forecast moves — while the ground and the water fogged themselves off a linear
+// window, `smoothstep(fogNear * 2.2, fogFar * 2.4, camD)`, that no weather ever touched. In 蒙德
+// that window opened at 198 m and finished at 1104 m on a 420 m map: 0 of 315 noon sight lines
+// reached its near edge, so the ground's fog term was **exactly zero in every frame the player has
+// ever seen**. Measured then: a tree 200 m out was 9.7% hazed standing on a hillside at 0.0%, the
+// same grass at 3 m and 140 m photographed identically (lum 126.2/sat 0.420 vs 130.2/0.433), and a
+// 龙脊 blizzard erased props 89% at 150 m over ground it dimmed by 2.7% — a whiteout with a hard
+// green floor showing through it.
+//
+// Three claims, and each needs a different kind of evidence:
+//   * the air is *one* number — asserted on the floats, in all three places it has to arrive;
+//   * that number reaches the ground as depth — asserted on two rects at two distances in one
+//     frame, each rect's subject proved by rays, with the pre-fix expression as the mutation;
+//   * and it follows the weather — asserted across the storm A/B, in a form that survives the
+//     storm also dimming the light.
+const NEAR_G = { x: 300, y: 585, w: 400, h: 80, label: 'ground near' };
+const FAR_G = { x: 250, y: 165, w: 500, h: 95, label: 'ground far' };
+const satOf = (rgb) => { const mx = Math.max(...rgb), mn = Math.min(...rgb); return mx ? (mx - mn) / mx : 0; };
+
+/**
+ * The whole section, for one zone: a calm day and a stormy one from the vista camera.
+ * `calm`/`storm` are `[forecastDay, hour]`. Leaves the camera back on `__wxAim`.
+ */
+const atmosphere = async (label, calm, storm, tagBase) => {
+  console.log(`\n=== one atmosphere in ${label}: near ground, far ground, and the weather`);
+  // Which way to look is measured, not assumed. 蒙德's spawn faces down a valley and 龙脊's faces
+  // into a slope 65 m away — the first version of this section pointed both at yaw 0.6 and the far
+  // rect in 龙脊 was ground at 60–70 m, i.e. the two rects were the same distance and the section
+  // was measuring nothing. So sweep the compass and take the direction with the longest sight line.
+  const pick = async () => {
+    let best = null;
+    for (const yaw of [0.6, 1.6, 2.6, 3.6, 4.6, 5.6]) {
+      await p.evaluate((y) => { window.__wxVista(y); window.__wxRender(); }, yaw);
+      const f = await p.evaluate((r, w, h) => window.__wxRectSubject(r, w, h), FAR_G, W, H);
+      const n = await p.evaluate((r, w, h) => window.__wxRectSubject(r, w, h), NEAR_G, W, H);
+      const deep = f.filter((r) => r && r.t && r.d > 140).length;
+      const shallow = n.filter((r) => r && r.t && r.d < 90).length;
+      console.log(`  yaw ${yaw.toFixed(1)}: far ${deep}/5 ground past 140 m, near ${shallow}/5 ground within 90 m`);
+      if (!best || deep * 10 + shallow > best.rank) best = { yaw, rank: deep * 10 + shallow, f, n, deep, shallow };
+    }
+    return best;
+  };
+  const aim = await pick();
+  // Three shots, and the reading is the last one. The first two exist because a frame taken shortly
+  // after a zone change is still converging: in 龙脊 the shot straight after the transition differed
+  // from the next one across 66% of the frame, sky and ground together, at a mean delta of 10 — not
+  // motion (the game is stopped and the composer has no temporal pass) but something still settling.
+  // A floor measured across that interval is a floor for a frame nobody reads, so the pair the floor
+  // is measured on is the pair the reference frame itself sits in, and both numbers are printed: a
+  // large `settle` next to a small `floor` is a frame that converged, while a floor as big as the
+  // settle would mean something in this zone never stops moving and the bars would have to say so.
+  // Pinning a day also turns the precipitation back on, so it is hidden per shot, after the pin.
+  const relMove = (a, b, r) => {
+    const s0 = satOf(rectStats(a, r).rgb), s1 = satOf(rectStats(b, r).rgb);
+    return Math.abs(s1 - s0) / Math.max(s0, 1e-6);
+  };
+  const look = async ([day, hour], tag) => {
+    await p.evaluate((d, h) => window.__wxPin(d, h), day, hour);
+    await sleep(1200);
+    const precipWas = await p.evaluate((y) => {
+      const was = window.__wxPrecip(false);
+      window.__wxVista(y);
+      window.__wxRender();
+      return was;
+    }, aim.yaw);
+    const img0 = await shoot(`${tag}-settle`);
+    const img1 = await shoot(`${tag}-floor`);
+    const img = await shoot(tag);
+    const settle = pixelsDiffering(img0, img1, 4), floorPx = pixelsDiffering(img1, img, 4);
+    const st = await p.evaluate(() => ({ ...window.__wxState(), ...window.__wxFog() }));
+    const near = rectStats(img, NEAR_G), far = rectStats(img, FAR_G);
+    const floorNear = relMove(img1, img, NEAR_G), floorFar = relMove(img1, img, FAR_G);
+    console.log(`  ${tag}: ${st.type} i${st.intensity} density ${st.ground} (scene ${st.scene},`
+      + ` water ${st.water}) dim ${st.dim}, running ${st.running}, precipitation hidden (was ${precipWas})`);
+    console.log(`    near lum ${near.lum} rgb ${near.rgb.join()} sat ${satOf(near.rgb).toFixed(3)}`
+      + ` | far lum ${far.lum} rgb ${far.rgb.join()} sat ${satOf(far.rgb).toFixed(3)}`);
+    console.log(`    settle ${settle} px → floor ${floorPx} px, near sat ±${(floorNear * 100).toFixed(1)}%,`
+      + ` far sat ±${(floorFar * 100).toFixed(1)}%`);
+    return { img, st, near, far, precipWas, settle, floorPx, floorNear, floorFar,
+      nearSat: satOf(near.rgb), farSat: satOf(far.rgb) };
+  };
+  const c = await look(calm, `${tagBase}-vista-calm`);
+  // One number, in all three places it has to arrive. The scene fog is what the renderer applies to
+  // every mesh it owns; the other two are the surfaces that fog themselves. This half needs no
+  // sight line, so it is asserted before the pixel half can bow out.
+  check(`${label}: the ground, the water and every prop are given the same air`,
+    c.st.ground === c.st.scene && (c.st.water === null || c.st.water === c.st.scene),
+    `ground ${c.st.ground}, scene ${c.st.scene}, water ${c.st.water}`);
+
+  // A rect must prove its subject, and this pair of rects is the whole pixel claim: if they are not
+  // ground at two very different distances, everything below is measuring something else. Reported
+  // as a SKIP rather than a FAIL when no direction has the sight line, because that is a fact about
+  // where the probe stands, not about the fog — and a green run with a silent hole is worse.
+  console.log(`  aiming at yaw ${aim.yaw.toFixed(1)}: near ${JSON.stringify(aim.n)}`);
+  console.log(`  ${''.padEnd(19)} far  ${JSON.stringify(aim.f)}`);
+  if (aim.deep < 4 || aim.shallow < 4) {
+    skipped(`${label}: the picture half of the atmosphere section`,
+      `no direction from this spawn holds ground within 90 m and ground past 140 m in one frame`
+      + ` (best yaw ${aim.yaw.toFixed(1)}: ${aim.shallow}/5 near, ${aim.deep}/5 far)`);
+    await p.evaluate(() => { window.__wxPrecip(true); window.__wxAim(0.6); window.__wxRender(); });
+    return { c, yaw: aim.yaw };
+  }
+  // Not a restatement of the line above: that one asked "is there a sight line at all", this one is
+  // the ratio the aerial-perspective reading needs. Two rects 50 m and 60 m out would satisfy the
+  // first and prove nothing.
+  const depths = (rays) => rays.filter((r) => r && r.t).map((r) => r.d).sort((x, y) => x - y);
+  const dNear = depths(aim.n)[Math.floor(depths(aim.n).length / 2)];
+  const dFar = depths(aim.f)[Math.floor(depths(aim.f).length / 2)];
+  check(`${label}: and the far rect is several times deeper into the world than the near one`,
+    dFar >= dNear * 2.5, `${dNear} m → ${dFar} m (×${(dFar / dNear).toFixed(1)})`);
+
+  // "The far ground is less saturated than the near ground" is not on its own a statement about fog:
+  // 蒙德's distance is grey cliff and 龙脊's foreground is snow, so the two rects do not start from
+  // the same colour and no absolute ratio holds in both zones (the first version of this check read
+  // 0.083/0.389 in 蒙德 and 0.116/0.165 in 龙脊 — one passing a 0.55 bar by a mile, the other
+  // failing it). What *is* a statement about fog is the same ratio with the fog taken out, so the
+  // mutation is not an extra assertion here, it is the control every reading below is measured
+  // against. And density 0 is very nearly the picture the ground used to be drawn with: the pre-fix
+  // `smoothstep(fogNear·2.2, fogFar·2.4, camD)` was a 198–1104 m window in 蒙德 and 88–720 m in
+  // 龙脊, which is 0.0% at both zones' near rect and 0.6% / 4.0% at their far one, against the
+  // 13.7% / 37.7% the air puts there now. From the player's own camera, which cannot see past about
+  // 150 m, it was exactly 0 in every frame.
+  //
+  // Every bar below is a multiple of what the frame does when nothing is changed, which `look()` has
+  // already measured on the very pair this reference frame sits in.
+  const { floorPx, floorNear, floorFar } = c;
+  const off = await p.evaluate(() => {
+    window.game.world.terrain.uniforms.uFogDensity.value = 0;
+    window.__wxRender();
+    return window.__wxFog();
+  });
+  const imgOff = await shoot(`${tagBase}-vista-nofog`);
+  const moved = pixelsDiffering(c.img, imgOff, 4);
+  const offNear = satOf(rectStats(imgOff, NEAR_G).rgb), offFar = satOf(rectStats(imgOff, FAR_G).rgb);
+  const dFarSat = (offFar - c.farSat) / c.farSat, dNearSat = Math.abs(offNear - c.nearSat) / c.nearSat;
+  const restored = await p.evaluate(() => { window.game._updateWeather(true); return window.__wxFog(); });
+  console.log(`  mutation → density ${off.ground}: ${moved} px moved,`
+    + ` far sat ${c.farSat.toFixed(3)} → ${offFar.toFixed(3)} (${(dFarSat * 100).toFixed(0)}%),`
+    + ` near ${c.nearSat.toFixed(3)} → ${offNear.toFixed(3)} (${(dNearSat * 100).toFixed(0)}%)`
+    + ` (restored to ${restored.ground})`);
+  check(`${label}: the air is what stands between you and the distance`,
+    c.farSat / c.nearSat < (offFar / offNear) * 0.8,
+    `far/near sat ${(c.farSat / c.nearSat).toFixed(3)} with the fog, ${(offFar / offNear).toFixed(3)} without it`);
+  check(`${label}: ...washed toward the fog colour, not blown out or blacked in`,
+    c.far.lum > c.near.lum * 0.85 && c.far.lum < c.near.lum * 1.7 && c.far.clip < 0.05,
+    `lum ${c.near.lum} → ${c.far.lum}, ${(c.far.clip * 100).toFixed(1)}% clipped`);
+  check(`${label}: putting the ground back on the pre-fix fog gives the distance its colour back`,
+    moved > Math.max(100000, floorPx * 3) && dFarSat > Math.max(0.25, floorFar * 4),
+    `${moved} px (floor ${floorPx}), far sat +${(dFarSat * 100).toFixed(0)}% (floor ±${(floorFar * 100).toFixed(1)}%)`);
+  check(`${label}: ...and it is the distance it acts on, not the frame`,
+    dNearSat < Math.max(0.12, floorNear * 3) && dFarSat > dNearSat * 2,
+    `near sat ${(dNearSat * 100).toFixed(0)}% (floor ±${(floorNear * 100).toFixed(1)}%)`
+    + ` against far ${(dFarSat * 100).toFixed(0)}%`);
+  check(`${label}: the product's own weather path puts the air back`,
+    restored.ground === c.st.ground && restored.ground === restored.scene,
+    `${off.ground} → ${restored.ground}`);
+
+  // The weather. A storm both thickens the air and dims the light, and the dimming alone would move
+  // any single rect — so the reading is the *gap* between the far ground and the ground at your
+  // feet. The two halves point in opposite directions and only thicker air can do that: the storm's
+  // dim factor takes the near ground down (蒙德 lum 115 → 108 at dim 0.71) while the haze pulls the
+  // far ground up toward the fog colour (143 → 165). A fix that only dimmed, or only tinted the
+  // whole frame, moves both the same way and fails here.
+  const s = await look(storm, `${tagBase}-vista-storm`);
+  const gapC = c.far.lum - c.near.lum, gapS = s.far.lum - s.near.lum;
+  console.log(`  ${label}: far−near lum ${gapC.toFixed(1)} → ${gapS.toFixed(1)},`
+    + ` near lum ${c.near.lum} → ${s.near.lum}, far sat ${c.farSat.toFixed(3)} → ${s.farSat.toFixed(3)},`
+    + ` density ${c.st.ground} → ${s.st.ground} at dim ${s.st.dim}`);
+  check(`${label}: a storm thickens the ground's air by the same factor as the props'`,
+    s.st.ground > c.st.ground * 1.5 && s.st.ground === s.st.scene
+    && (s.st.water === null || s.st.water === s.st.scene),
+    `${c.st.ground} → ${s.st.ground} (scene ${s.st.scene}, water ${s.st.water})`);
+  check(`${label}: and the distance goes with it — the far ground washes out while the near ground darkens`,
+    gapS > gapC + 8 && s.near.lum < c.near.lum && s.far.lum > c.far.lum,
+    `gap ${gapC.toFixed(1)} → ${gapS.toFixed(1)}, near lum ${c.near.lum} → ${s.near.lum},`
+    + ` far lum ${c.far.lum} → ${s.far.lum}`);
+  // The direction, named. "Washes out" is not "gets brighter" and it is certainly not "loses
+  // saturation" — 蒙德's air is a saturated blue-white (#c8ddf0) and its 240 m hillside is already
+  // washed past it, so thicker fog *raises* that rect's saturation while 龙脊's lowers it, and the
+  // first version of this check went red on exactly that. What both do is move toward the colour of
+  // the air, and the near ground does not: it walks away from it as the storm dims the light. The
+  // target is the authored fog colour in sRGB and the pixels have been through bloom and ACES, so
+  // this is a reading of a direction and not of an absolute distance — which is why it is scored as
+  // "much closer" against "no closer", a split of 0.65 versus 1.1 that no tone curve inverts.
+  const fogRGB = [0, 2, 4].map((i) => parseInt(s.st.fogHex.slice(i, i + 2), 16));
+  const distTo = (rgb) => Math.hypot(...rgb.map((v, i) => v - fogRGB[i]));
+  const [fc, fs2] = [distTo(c.far.rgb), distTo(s.far.rgb)];
+  const [nc, ns] = [distTo(c.near.rgb), distTo(s.near.rgb)];
+  console.log(`  distance to the air's own #${s.st.fogHex}: far ${fc.toFixed(0)} → ${fs2.toFixed(0)}`
+    + ` (×${(fs2 / fc).toFixed(2)}), near ${nc.toFixed(0)} → ${ns.toFixed(0)} (×${(ns / nc).toFixed(2)})`);
+  check(`${label}: ...toward the colour of the air, which is not where the near ground goes`,
+    fs2 < fc * 0.8 && ns > nc * 0.95,
+    `far ×${(fs2 / fc).toFixed(2)}, near ×${(ns / nc).toFixed(2)} of the way to #${s.st.fogHex}`);
+  // Every reading in this section is of ground with the storm's own drops hidden, and "we hid it" is
+  // only worth saying if it was there: `precipWas` cannot say so, because the calm shot hid it first
+  // and nothing turns it back on. So put it back and photograph it — the drops are in the frame if
+  // showing them changes the frame by much more than the frame changes by itself.
+  const backOn = await p.evaluate(() => { window.__wxPrecip(true); window.__wxRender(); return window.__wxState().drawn; });
+  const imgDrops = await shoot(`${tagBase}-vista-storm-drops`);
+  const dropsPx = pixelsDiffering(s.img, imgDrops, 4);
+  console.log(`  showing the storm's ${backOn} drops again moves ${dropsPx} px (floor ${s.floorPx})`);
+  check(`${label}: and those were readings of the ground, with the storm's own drops out of the frame`,
+    backOn > 1000 && dropsPx > Math.max(4000, s.floorPx * 3),
+    `${backOn} points, ${dropsPx} px against a floor of ${s.floorPx} px`);
+  await p.evaluate(() => { window.__wxAim(0.6); window.__wxRender(); });
+  return { c, s, yaw: aim.yaw };
+};
+
+await atmosphere('蒙德', [3, 15], [2, 15], 'mondstadt');
 
 /* ------------------------------------------------- the dome, from above the ridge -- */
 
@@ -679,6 +956,17 @@ const travel = async (zone) => p.evaluate(async (z) => {
 if (!await travel('dragonspine')) skipped('the blizzard section', 'the zone transition did not take');
 else {
   await p.evaluate(() => window.__wxHud(false));
+  // The atmosphere section again, in the zone with the thickest authored air (0.0042, 2.6× 蒙德's)
+  // and the worst storm — this is where the two atmospheres were most visible, and it is the reading
+  // that would catch a fix which only happened to work at one density. It runs *first* here because
+  // it is the only thing in the probe that **measures** which way to look, and the two shots below
+  // need that answer. 龙脊's spawn faces a slope 65 m
+  // away and the walking camera __wxAim leaves is inside it: the snowfall/blizzard pair used to be
+  // two photographs of the near-black interior of one polygon, 6168 px apart, and the value that
+  // passed before them (621669 px) was a stale composited frame from the previous camera. Same zone,
+  // same days, same assertions — from a camera pointed at the mountain.
+  const atm = await atmosphere('龙脊雪山', [0, 12], [3, 12], 'dragonspine');
+  await p.evaluate((y) => { window.__wxVista(y); window.__wxRender(); }, atm.yaw);
   const snow = await frame(0, 12, 'dragonspine-base');       // day 0 = the authored zone
   const bliz = await frame(3, 12, 'dragonspine-blizzard');   // 整日暴风雪
   check('day 0 in 龙脊雪山 is still the snowfall every other probe photographs',

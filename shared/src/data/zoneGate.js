@@ -235,9 +235,13 @@ export const SKY_KEYS = {
   ambientGround: { by: 'client/src/gfx/sky.js', why: 'lower half — bounce off the ground' },
   ambientIntensity: { by: 'client/src/gfx/sky.js', why: 'strength of that hemisphere, and the terrain\'s uAmbInt' },
   fogColor: { by: 'client/src/gfx/sky.js', why: 'what distance fades to; also the sky horizon when no horizonColor is given' },
-  fogNear: { by: 'client/src/gfx/terrain.js', why: 'metres before fog starts (the terrain scales it up: distant ground must stay readable)' },
-  fogFar: { by: 'client/src/gfx/terrain.js', why: 'metres at which fog is total' },
-  fogDensity: { by: 'client/src/gfx/sky.js', why: 'exponential density for the scene fog the meshes use' },
+  // One density, two consumers, on purpose: `sky.js` puts it in `THREE.FogExp2` for every mesh the
+  // renderer fogs for us (props, grass, characters) and `terrain.js` puts the *same* number in a
+  // uniform for the two surfaces that fog themselves (the ground and the water). There used to be
+  // a second pair of keys here — `fogNear`/`fogFar`, a linear window only the terrain read, scaled
+  // ×2.2/×2.4 — and the world had two atmospheres that disagreed by a wall of clear green ground
+  // behind hazed trees. Deleted with the window; see the fog block in gfx/terrain.js.
+  fogDensity: { by: 'client/src/gfx/sky.js', why: 'exponential density of the air: THREE.FogExp2 for meshes, uFogDensity for the ground and water' },
   rayleigh: { by: 'client/src/gfx/sky.js', why: 'falloff exponent of the zenith→horizon gradient' },
   turbidity: { by: 'client/src/gfx/sky.js', why: 'haze: widens the Mie halo around the sun' },
   exposure: { by: 'client/src/engine/renderer.js', why: 'ACES exposure for this zone — where its materials sit on the curve' },
@@ -509,8 +513,17 @@ export function zoneGateReport({ scatter = null, single = null, zones = ZONES } 
       if (!(z.sky.exposure > 0.35 && z.sky.exposure < 1.7)) {
         problems.push(at(`sky.exposure ${z.sky.exposure} is outside (0.35, 1.7)`));
       }
-      if (!(z.sky.fogFar > z.sky.fogNear)) {
-        problems.push(at(`sky.fogFar ${z.sky.fogFar} must be beyond fogNear ${z.sky.fogNear}`));
+      // Fog density is bounded against the zone's own size, because the only thing that makes a
+      // density right or wrong is how far the player can see in that zone. The readable quantity is
+      // the distance at which the air is half opaque — `1 - exp(-(density·d)²) = 0.5` at
+      // `d = sqrt(ln 2)/density` — and it has to land between "arm's length is hazed" and "you can
+      // see clean across the map". The upper bound is the one with a history: the terrain used to
+      // fog off a linear window scaled ×2.2/×2.4, which in 蒙德 put full fog at 1104 m on a 420 m
+      // map (ratio 2.6, a FAIL here) and photographed as a wall of identical green.
+      const halfD = Math.sqrt(Math.LN2) / z.sky.fogDensity;
+      if (!(halfD > z.size * 0.15 && halfD < z.size * 1.6)) {
+        problems.push(at(`sky.fogDensity ${z.sky.fogDensity} is half-opaque at ${halfD.toFixed(0)} m, `
+          + `outside (0.15, 1.6) × the zone's own ${z.size} m`));
       }
       for (const key of ['vaultColor', 'vaultGlow']) {
         if (z.sky[key] !== undefined && !z.indoor) {

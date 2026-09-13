@@ -1027,6 +1027,13 @@ export class World {
     if (this.zone.indoor) return;
     this.sky.applyWeather(w);
     this.weather.setStorm(w.type, w.intensity);
+    // `sky.applyWeather` set `scene.fog.density`, which is the air every prop, blade of grass and
+    // character is standing in. The ground and the water are not in `scene.fog` — they fog
+    // themselves, from a uniform — so this is the same "two things that have to agree" as the dim
+    // factor below, one term further out. Without it a blizzard is a whiteout with a hard green
+    // floor showing through it.
+    this.terrain.applyWeather(w);
+    this.water?.applyWeather?.(w);
     // A storm dims the world it falls on. `Sky` owns the factor (it is derived from the zone's own
     // baseline cloudiness), `World` owns the two things that have to agree about it: the
     // DirectionalLight that lights props and characters, and the terrain, whose light term is a
