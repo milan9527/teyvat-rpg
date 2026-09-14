@@ -362,17 +362,15 @@ try {
       orig(d);
     };
 
-    window.__freeze = () => {
-      window.__frozen = true;
-      g.stop();
-      const you = (g.socket.latest()?.players || [])
-        .find((r) => Number(r.id) === Number(g.playerId)) || null;
-      window.__you = you;
+    // Where the player and its neighbourhood land on screen, through the camera as it stands.
+    // Split out of `__freeze` because the body section re-frames the camera and has to re-ask:
+    // a projection measured before the boom moved describes a picture nobody took.
+    window.__proj = () => {
       const el = g.r.renderer.domElement;
       // `Vector3` out of the scene (`scene.position.constructor`) — the page has no THREE global.
       const V = (x, y, z) => {
         const v = new g.scene.position.constructor(x, y, z);
-        v.project(g.overlay.camera);
+        v.project(g.camera);
         return { x: +((v.x * 0.5 + 0.5) * el.clientWidth).toFixed(1),
           y: +((-v.y * 0.5 + 0.5) * el.clientHeight).toFixed(1), z: +v.z.toFixed(3) };
       };
@@ -381,18 +379,114 @@ try {
       // below is a distance in **metres** instead of a pixel count that means nothing at another
       // viewport size or camera pitch.
       const up = V(g.me.x, g.me.y + 1.9, g.me.z);
-      const perM = Math.abs(up.y - me.y);
+      // The attacker, through the same camera. Carried here rather than only in `__freeze` because
+      // "the light landed nearer to me than to it" is a claim about one picture, and the body
+      // section moves the boom between the freeze and the frames that claim is measured on.
+      const s = window.__hit?.d?.src ? g.actors.enemies.get(window.__hit.d.src) : null;
+      return { V, me, up, perM: +Math.abs(up.y - me.y).toFixed(1),
+        srcAt: s ? V(s.x, s.y + (s.actor.height || 1) * 0.5, s.z) : null,
+        w: el.clientWidth, h: el.clientHeight,
+        dist: +Math.hypot(g.camera.position.x - g.me.x, g.camera.position.y - (g.me.y + 0.9),
+          g.camera.position.z - g.me.z).toFixed(2) };
+    };
+    window.__freeze = () => {
+      window.__frozen = true;
+      g.stop();
+      const you = (g.socket.latest()?.players || [])
+        .find((r) => Number(r.id) === Number(g.playerId)) || null;
+      window.__you = you;
+      const { V, me, up, perM, w, h, dist } = window.__proj();
       const src = window.__hit?.d?.src ? g.actors.enemies.get(window.__hit.d.src) : null;
       return {
         you, aura: g.me.aura || null, actorAura: g.me.actor?.aura || null,
         hud: g.hudState().me.aura || null,
         char: g.party[g.activeSlot], slot: g.activeSlot, element: g.me.def?.element || null,
-        me, up, perM: +perM.toFixed(1), w: el.clientWidth, h: el.clientHeight,
+        me, up, perM, w, h, dist,
         hp: Math.round(g.me.hp), maxHp: Math.round(g.me.maxHp),
         src: src ? { id: window.__hit.d.src, defId: src.defId, name: src.actor.def.name,
           d: +Math.hypot(src.x - g.me.x, src.z - g.me.z).toFixed(1),
           at: V(src.x, src.y + (src.actor.height || 1) * 0.5, src.z) } : null,
       };
+    };
+    /**
+     * Put the camera a chosen number of metres from the body, along the direction it is already
+     * looking from.
+     *
+     * Whatever the walk left the boom at is not a camera to photograph a model with. This camp
+     * sits on a hillside, `CameraRig`'s occlusion sweep is allowed down to `MIN_DIST * 0.55`, and
+     * it had pulled in to **1.05 m** — 707 px on every metre, a 1.8 m model overflowing a 640 px
+     * frame, a "body box" of 1556x1839 that swallowed the whole picture *and* the control box
+     * beside it (both read the same 151 px), and a "the change is centred on the character" bar of
+     * 1.6 m on a frame only 1.4 m wide, which nothing could fail.
+     *
+     * The azimuth is left alone deliberately: the claim being measured is about the body's own
+     * pixels moving, not about which side of it faces the lens, and turning the model would be a
+     * probe-side fix-up for something the product never does.
+     */
+    window.__frameBody = (dist = 4.6) => {
+      const V = (x, y, z) => new g.scene.position.constructor(x, y, z);
+      const aim = V(g.me.x, g.me.y + 0.95, g.me.z);
+      const dir = g.camera.position.clone().sub(aim);
+      if (dir.lengthSq() < 1e-4) dir.set(0, 0.35, 1);
+      dir.normalize();
+      // A little above the aim point regardless of where the rig had ended up, so a boom that had
+      // been jammed under the hillside does not photograph the model from its ankles.
+      dir.y = Math.max(dir.y, 0.16);
+      dir.normalize();
+      g.camera.position.copy(aim).add(dir.multiplyScalar(dist));
+      g.camera.lookAt(aim);
+      g.camera.updateMatrixWorld(true);
+      return window.__proj();
+    };
+    /**
+     * The hurt vignette, pinned.
+     *
+     * `.hurt.on` is a full-screen red radial gradient with a 0.42 s CSS fade, and the class comes
+     * off inside `hud.update(dt)` — which a stopped game does not call. So it sat frozen over the
+     * HUD captures: the pip's own centre read (73,18,19) with the aura on and (68,102,111) with it
+     * off, both of them the vignette rather than the bead, and a frame 1.2 s after the reaction
+     * still differed from the pre-hit plate across 451338 px because the vignette had come back
+     * with the re-fired payload. Returns the opacity it found, so "it was really covering the
+     * frame" is a reading and not an assumption.
+     */
+    window.__hurt = (on) => {
+      const el = document.querySelector('.hurt');
+      if (!el) return null;
+      const was = +getComputedStyle(el).opacity;
+      el.style.transition = 'none';
+      el.style.opacity = on ? '1' : '0';
+      return was;
+    };
+    /**
+     * The damage flash, pinned — the vignette's twin, one layer down.
+     *
+     * `col = mix(col, vec3(1.0, 0.72, 0.72), uHitFlash)` is the *last* line of the toon fragment,
+     * so a frozen flash both pulls the body to pink and scales every term under it by
+     * `1 - uHitFlash`. `hitFlash` decays at 5/s inside `Actor.update(dt)` — which a stopped game
+     * never calls — and this probe freezes the moment a reaction lands, i.e. within 0.2 s of being
+     * hit. Measured in `.run/coat-lab.mjs` by pinning the flash by hand at noon, on this same
+     * character, over the same 8.8k body pixels: at 0 the body is 184,199,194 and the coat moves it
+     * 28.4 counts toward 水; at 0.75 the body is 225,215,214 and the coat moves it 3.1. The probe's
+     * own confirmation run read 225,215,214 and 2.7 — the same picture, digit for digit. So a run
+     * that froze late passed and a run that froze early failed the *same* build. Pin it off, and
+     * return what was found so the log says which run it was.
+     */
+    window.__flash = (v) => {
+      const a = g.me.actor;
+      let n = 0, was = 0;
+      a?.rig?.group?.traverse((o) => {
+        if (!o.material) return;
+        for (const m of (Array.isArray(o.material) ? o.material : [o.material])) {
+          const u = m?.userData?.toon;
+          if (!u?.uHitFlash) continue;
+          was = Math.max(was, u.uHitFlash.value);
+          if (v != null) u.uHitFlash.value = v;
+          n++;
+        }
+      });
+      // The field too, or the next `update(dt)` puts the uniform straight back.
+      if (v != null && a) a.hitFlash = v;
+      return { n, was: +was.toFixed(3) };
     };
     // The control, and the restore: the server's own row with `au` set to whatever is asked for.
     // Through `applyServer` and `ui.update` — the product's consumers — rather than by writing
@@ -413,20 +507,50 @@ try {
         for (const m of (Array.isArray(o.material) ? o.material : [o.material])) {
           const u = m?.userData?.toon;
           if (!u) continue;
-          out.push({ glow: +u.uElementGlow.value.toFixed(3), col: u.uElementColor.value.getHex() });
+          out.push({ glow: +u.uElementGlow.value.toFixed(3), col: u.uElementColor.value.getHex(),
+            wash: +(u.uElementWash?.value ?? 0).toFixed(3) });
         }
       });
       return { n: out.length, glows: [...new Set(out.map((o) => o.glow))],
-        cols: [...new Set(out.map((o) => o.col))] };
+        cols: [...new Set(out.map((o) => o.col))],
+        washes: [...new Set(out.map((o) => o.wash))] };
+    };
+    // The mutation: the coat, forced to a value, on the rig that is standing in front of the
+    // camera right now. Writing the uniform directly is the point — it is the one term under test,
+    // and 0 is the build this section was red on.
+    window.__setWash = (v) => {
+      let n = 0, was = null;
+      g.me.actor?.rig?.group?.traverse((o) => {
+        if (!o.material) return;
+        for (const m of (Array.isArray(o.material) ? o.material : [o.material])) {
+          const u = m?.userData?.toon;
+          if (!u?.uElementWash) continue;
+          if (was === null) was = u.uElementWash.value;
+          u.uElementWash.value = v;
+          n++;
+        }
+      });
+      // The value it replaced, so the mutation can be undone exactly rather than by re-deriving
+      // what the product would have written (`setElementAura` early-returns on an unchanged aura,
+      // so re-applying the same row would not put it back).
+      return { n, was };
     };
     window.__pips = () => [...document.querySelectorAll('.pcard')].map((n) => {
       const a = n.querySelector('.av .aura');
+      const av = n.querySelector('.av');
       const cs = a ? getComputedStyle(a) : null;
       const r = a ? a.getBoundingClientRect() : null;
+      const ar = av ? av.getBoundingClientRect() : null;
+      // Where the pip *would* be on this card, from the avatar it is positioned against
+      // (`top: -3px; right: -5px; 15x15` in style.css). An off-field card's pip is
+      // `display: none`, so its own rect is 0x0 at 0,0 — padding that gave the control box
+      // `-6,-6 12x12`, i.e. the top-left corner of the HUD, which is not a pip on any card.
+      const box = ar ? { x: Math.round(ar.x + ar.width + 5 - 15), y: Math.round(ar.y - 3), w: 15, h: 15 } : null;
       return { slot: +n.dataset.slot, active: n.classList.contains('active'),
         display: cs?.display ?? 'missing', bg: cs?.backgroundColor ?? '',
         shadow: (cs?.boxShadow ?? '').slice(0, 40), text: a?.textContent ?? '', title: a?.title ?? '',
-        rect: r ? { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) } : null };
+        rect: r ? { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) } : null,
+        box };
     });
     window.__canvas = (on) => {
       g.r.renderer.domElement.style.visibility = on ? '' : 'hidden';
@@ -493,11 +617,27 @@ try {
   if (!check('walked into the camp on the product\'s own click-to-move locomotion',
     trip.d <= camp.radius + 6 && trip.alive,
     `${trip.d} m from ${camp.at}, alive ${trip.alive}`)) throw new Error('never reached the camp');
+  // ...and then into the middle of it. `radius + 6` is a generous arrival tolerance for a 200 m
+  // walk, and a run that stopped 15.8 m short stood next to one creature with the other two 12 and
+  // 18 m away — one element, no reaction, ever. The camp's own creatures spawn inside `radius`, so
+  // standing at its centre is what puts more than one of them in range.
+  const inside = await travelTo(camp.at, 180000, Math.max(2, Math.min(5, camp.radius)));
+  console.log(`  (into the camp: ${inside.d} m from the centre (radius ${camp.radius} m), hp ${inside.hp})`);
 
   // Close in on one of the camp's *own* creatures, by name: after a 200 m walk the census also
   // contains whatever streamed in on the way, and a 丘丘人 attaches nothing.
   const inCamp = (e) => camp.enemies.includes(e.defId);
   const nearest = async () => (await census()).filter(inCamp).sort((a, c) => a.d - c.d)[0] || null;
+  // A reaction needs *two* elements, so "the nearest creature that attaches something" is not
+  // enough: this camp is two 雷史莱姆 and one 水史莱姆, and a run that parked next to the water
+  // slime with both electro ones 12 and 18 m away soaked 204 payloads of pure 水 in four minutes,
+  // lost the whole party's hp and never saw a reaction. What is needed is the nearest creature
+  // whose element is *not* the one already attached — asked of the enemy sheet, so it follows the
+  // data rather than a hard-coded pair.
+  const elOf = (e) => ENEMIES[e.defId]?.element || null;
+  const nearestOther = async (au) => (await census()).filter((e) => inCamp(e) && elOf(e)
+    && elOf(e) !== 'physical' && elOf(e) !== au && resolveReaction(elOf(e), au))
+    .sort((a, c) => a.d - c.d)[0] || null;
   let mob = await nearest();
   console.log(`  (camp: ${(await census()).map((e) => `${e.name} Lv.${e.lv} @${e.d}m`).join(', ')})`);
   if (mob) await approach(mob.id, 2.4, 60000, 0.9);
@@ -521,23 +661,58 @@ try {
     const you = (g.socket.latest()?.players || []).find((r) => Number(r.id) === Number(g.playerId));
     return { au: you?.au || null, me: g.me.aura || null, hit: window.__hit?.d?.reaction || null,
       wire: window.__wire.length, log: window.__auLog.length, hp: Math.round(g.me.hp),
-      alive: !!g.me.alive };
+      maxHp: Math.round(g.me.maxHp || 0), alive: !!g.me.alive };
+  });
+  /**
+   * Eat, the way the inventory panel does.
+   *
+   * Standing in a camp of four for minutes costs the party its whole health bar: one run got its
+   * reaction at **hp 0/3782** and photographed a corpse, and then the respawn put the body 200 m
+   * away — so the pip read the dead card's grey (22,24,29) and the phase section measured the
+   * effect against a projection 183 m off screen. A fresh guest starts with five 甜甜花酿鸡
+   * (`repo.js`: 2000 flat + 18 % of max hp each, so ~12 k hp of headroom), and `useConsumable` is
+   * the function the panel's own button calls — the gateway rate-limits it to 6 per 10 s, which one
+   * dish per poll cycle stays well under.
+   */
+  const eat = () => p.evaluate(async () => {
+    const g = window.game;
+    const id = ['sweetMadame', 'northernStew', 'mushroomPizza', 'suspiciousFood']
+      .find((q) => (g.player?.inventory?.[q] || 0) > 0);
+    if (!id) return null;
+    try { await g.useConsumable(id); return id; } catch (e) { return `refused:${e?.code || e?.message}`; }
   });
   const deadline = Date.now() + 300000;
-  let frozen = null, last = 0;
+  let frozen = null, last = 0, ate = [], lastAte = 0;
   for (;;) {
     const st = await state();
-    if (st.hit && st.au && st.me) { frozen = await p.evaluate(() => window.__freeze()); break; }
+    // Alive is part of the freeze condition, not a separate check after it: a downed character is
+    // still drawn, still carries the aura on the wire and still satisfies every other clause here.
+    if (st.hit && st.au && st.me && st.alive) {
+      frozen = await p.evaluate(() => window.__freeze());
+      break;
+    }
     if (Date.now() > deadline) break;
+    if (st.maxHp && st.hp < st.maxHp * 0.55 && Date.now() - lastAte > 2500) {
+      lastAte = Date.now();
+      const dish = await eat();
+      if (dish) ate.push(dish);
+      console.log(`  (hp ${st.hp}/${st.maxHp} — ate ${dish || 'nothing: the pantry is empty'})`);
+    }
     if (!st.alive) { console.log('  (the party was downed while standing in the camp)'); break; }
     if (Date.now() - last > 12000) {
       last = Date.now();
       console.log(`  (waiting: ${st.wire} payload(s), aura ${JSON.stringify(st.au)}, reaction`
         + ` ${JSON.stringify(st.hit)}, hp ${st.hp}, ${st.log} aura transition(s))`);
       // The creatures hop about and a 水史莱姆 that wandered 12 m off attaches nothing. Re-close
-      // the gap on the nearest one that can, without ever attacking it.
-      const now = await nearest();
-      if (now && now.d > 5) await approach(now.id, 2.4, 20000, 0.9);
+      // the gap, without ever attacking: on the creature that carries the *other* element once
+      // something is attached, because standing in range of one element for four minutes only
+      // renews that element, and on the nearest one otherwise.
+      const now = (st.au ? await nearestOther(st.au) : null) || await nearest();
+      if (now && now.d > 5) {
+        console.log(`  (closing on ${now.name} @${now.d}m — ${elOf(now) || 'physical'}`
+          + `${st.au ? ` against the ${st.au} already attached` : ''})`);
+        await approach(now.id, 2.4, 20000, 0.9);
+      }
     }
     await sleep(500);
   }
@@ -578,6 +753,12 @@ try {
   const au = frozen.aura;
   console.log(`  (froze with ${au} attached to ${CHARACTERS[frozen.char]?.name}, hp ${frozen.hp}/${frozen.maxHp},`
     + ` ${frozen.perM} px per metre, camp reaction ${hit.d.reaction})`);
+  // A body, not a corpse — the precondition for every picture below. See `eat` above for what this
+  // caught: a downed character keeps its aura on the wire and keeps being drawn, so without this
+  // clause the section photographed one and then chased its respawn 200 m across the map.
+  check('...on a character who is still standing, so the pictures below are of a body',
+    frozen.hp > 0,
+    `hp ${frozen.hp}/${frozen.maxHp}, ate ${ate.length ? ate.join('+') : 'nothing'} while being soaked`);
   check('the freeze caught the attachment on the wire, the record and the HUD state',
     !!au && frozen.you?.au === au && frozen.actorAura === au && frozen.hud === au,
     `wire ${JSON.stringify(frozen.you?.au)}, me ${JSON.stringify(au)},`
@@ -602,11 +783,17 @@ try {
     `${uAura.n} materials, glow ${uAura.glows.join('/')} colour`
     + ` ${uAura.cols.map((c) => `0x${c.toString(16)}`).join('/')}, wanted 0x${ELEMENTS[au].color.toString(16)}`
     + ` (${ELEMENTS[au].name})`);
-  check('...and stripping `au` from the same snapshot row puts the innate one back',
+  // `washes` is in here for a reason that is not about the aura at all: the coat is a *new* term in
+  // TOON_FRAG, and every enemy sheet and character shot in the suite was calibrated before it
+  // existed. Those frames stay bit-identical only if the term is exactly 0 at the resting operating
+  // point — not small, 0 — so that is asserted on the uniform rather than assumed from the code.
+  check('...and stripping `au` from the same snapshot row puts the innate one back, coat and all',
     dry.aura === null && dry.actor === null && uDry.cols.length === 1
     && uDry.cols[0] === (ELEMENTS[onField.element]?.color ?? 0xffffff)
-    && uDry.glows.length === 1 && uDry.glows[0] < uAura.glows[0],
-    `glow ${uDry.glows.join('/')} colour ${uDry.cols.map((c) => `0x${c.toString(16)}`).join('/')},`
+    && uDry.glows.length === 1 && uDry.glows[0] < uAura.glows[0]
+    && uDry.washes.length === 1 && uDry.washes[0] === 0,
+    `glow ${uDry.glows.join('/')} coat ${uDry.washes.join('/')} (must be exactly 0)`
+    + ` colour ${uDry.cols.map((c) => `0x${c.toString(16)}`).join('/')},`
     + ` ${CHARACTERS[onField.char]?.name} is ${onField.element}`
     + ` (0x${(ELEMENTS[onField.element]?.color ?? 0xffffff).toString(16)})`);
 
@@ -615,50 +802,202 @@ try {
     await p.screenshot({ path: file });
     return decodePng(fs.readFileSync(file));
   };
+  // Render, let the compositor take it, render again, then capture — a screenshot returns the
+  // *last composited* frame, and on llvmpipe at 6 fps a capture taken straight after a step
+  // returns the one before it. That is how the 0.05 s phase below came back bit-identical to the
+  // pre-hit plate: `0 px` was not "nothing was drawn", it was "nothing was drawn *yet*".
+  const shoot = async (tag, steps = 0) => {
+    await p.evaluate((n) => window.__step(n), steps);
+    await p.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+    await sleep(260);
+    await p.evaluate(() => window.__step(0));
+    return cap(tag);
+  };
 
   // The body against black, with the world hidden and the player's own group kept — `photograph
   // the model alone`, so the difference between the two frames can only be the body.
   const iso = await p.evaluate(() => window.__isolate([window.game.me.actor.group]));
   check('the world was hidden and the character was not', iso.hidden > 0 && iso.pools > 50,
     `${iso.hidden} scene children hidden, ${iso.pools} kept`);
-  await p.evaluate(() => window.__step(0));
-  await sleep(400);
-  const bodyDry = await cap('01-body-dry');
-  await p.evaluate((el) => window.__setAu(el), au);
-  await p.evaluate(() => window.__step(0));
-  await sleep(400);
-  const bodyAura = await cap('02-body-aura');
-
-  // Where the body is, through the same camera the freeze projected it with: a box 1.1 m either
-  // side of the player and from its feet to a little over its head.
+  // ...and the effect layer emptied. `__isolate` *keeps* the vfx pools (they are what every other
+  // probe is there to photograph), so the leftovers of a fight were still in frame: a violet
+  // bokeh of additive orbs over a plate at luma 135, bloom-flooded by a body filling a 1.05 m
+  // camera. Nothing to do with the aura, and it is the background both readings are taken over.
+  await p.evaluate(() => window.__canon());
+  // ...and the damage flash pinned off. See `__flash`: it is the last line of the fragment shader
+  // and this probe freezes within 0.2 s of being hit, so whether the body is its own colour or pink
+  // depended on which tick the reaction landed on. Read once for the log, then pinned, then read
+  // back — the pin is asserted on the mutation below rather than trusted.
+  const flashWas = await p.evaluate(() => window.__flash(0));
+  const flashNow = await p.evaluate(() => window.__flash(null));
+  // The vignette is the same leftover one layer up, and it belongs here rather than only over the
+  // HUD captures further down: on a run that froze on the very tick a hit landed (`damage flash 1`
+  // in the line below) it sat at full opacity over *these* captures too. The black plate read luma
+  // 15.4 instead of 4.1, and 648813 of 655360 px moved between two consecutive captures of the
+  // *same dry body*, because its 0.42 s CSS fade was running through both of them.
+  const hurtWas = await p.evaluate(() => window.__hurt(false));
+  const framed = await p.evaluate(() => window.__frameBody(4.6));
   const bodyBox = {
-    x: Math.round(frozen.me.x - frozen.perM * 1.1), y: Math.round(frozen.me.y - frozen.perM * 1.6),
-    w: Math.round(frozen.perM * 2.2), h: Math.round(frozen.perM * 2.6),
+    x: Math.round(framed.me.x - framed.perM * 1.1), y: Math.round(framed.me.y - framed.perM * 1.6),
+    w: Math.round(framed.perM * 2.2), h: Math.round(framed.perM * 2.6),
   };
   // ...and the same box moved three metres to the side, which is empty black in both frames. A
   // one-sided "it differed" is equally true of a frame that changed everywhere.
-  const offBox = { ...bodyBox, x: Math.max(0, Math.min(frozen.w - bodyBox.w,
-    bodyBox.x + Math.round(frozen.perM * 3.4))) };
-  const onBody = diffRect(bodyAura, bodyDry, bodyBox);
-  const offBody = diffRect(bodyAura, bodyDry, offBox);
-  const whole = diffMask(bodyAura, bodyDry, 8);
-  const plate = rectStats(bodyDry, { x: 0, y: 0, w: bodyDry.width, h: bodyDry.height, label: 'plate' });
-  console.log(`  (body box ${bodyBox.x},${bodyBox.y} ${bodyBox.w}x${bodyBox.h}: ${onBody} px differ,`
-    + ` beside it ${offBody}, whole frame ${whole.count} px`
-    + `${whole.box ? ` in ${whole.box.w}x${whole.box.h} at ${whole.box.x},${whole.box.y}` : ''};`
-    + ` isolated plate luma ${plate.lum})`);
+  const offBox = { ...bodyBox, x: Math.max(0, Math.min(framed.w - bodyBox.w,
+    bodyBox.x + Math.round(framed.perM * 3.4))) };
+  console.log(`  (camera ${frozen.dist} m -> ${framed.dist} m, ${frozen.perM} -> ${framed.perM} px/m;`
+    + ` body box ${bodyBox.x},${bodyBox.y} ${bodyBox.w}x${bodyBox.h} in ${framed.w}x${framed.h};`
+    + ` damage flash ${flashWas.was} when we froze, now ${flashNow.was} on ${flashNow.n} materials)`);
+  // The framing is a precondition, so it is a reading: a box that does not fit inside the frame
+  // cannot be told apart from the control box beside it, and a metre that spans most of the
+  // viewport makes every distance-in-metres bar below unfailable.
+  check('the model is framed, so "on the body" and "beside it" are different pixels',
+    bodyBox.w > 0 && bodyBox.x >= 0 && bodyBox.y >= 0
+    && bodyBox.x + bodyBox.w <= framed.w && bodyBox.y + bodyBox.h <= framed.h
+    && offBox.x >= bodyBox.x + bodyBox.w * 0.8,
+    `${bodyBox.w}x${bodyBox.h} at ${bodyBox.x},${bodyBox.y} inside ${framed.w}x${framed.h},`
+    + ` control box at ${offBox.x} (body ends at ${bodyBox.x + bodyBox.w})`);
+
+  const bodyDry = await shoot('01-body-dry');
+  const bodyFloor = await shoot('01-body-dry-again');
+  await p.evaluate((el) => window.__setAu(el), au);
+  const bodyAura = await shoot('02-body-aura');
+  const floorPx = diffMask(bodyFloor, bodyDry, 8).count;
+
+  const readBody = (img) => ({
+    onBody: diffRect(img, bodyDry, bodyBox), offBody: diffRect(img, bodyDry, offBox),
+    whole: diffMask(img, bodyDry, 8),
+  });
+  const withCoat = readBody(bodyAura);
+  const plate = rectStats(bodyDry, { ...offBox, label: 'plate' });
+
+  /**
+   * The body's own colour: the mean over the pixels that *are* the model.
+   *
+   * A rect mean cannot answer this. The tightest box that certainly holds torso and skirt is still
+   * 64 % black plate at this framing, so a coat that moved every body pixel by 25 counts showed up
+   * as 9 on the rect's mean — a reading that says "barely visible" about a body that is visibly
+   * blue. The mask is taken from the **dry** frame (luma > 40, i.e. "brighter than the plate"), so
+   * which pixels are measured is decided before the aura is applied and cannot be selected by what
+   * the aura happened to change.
+   */
+  const bodyPx = (() => {
+    const pts = [];
+    for (let y = bodyBox.y; y < bodyBox.y + bodyBox.h; y++) {
+      for (let x = bodyBox.x; x < bodyBox.x + bodyBox.w; x++) {
+        const i = (y * bodyDry.width + x) * 4;
+        const l = 0.2126 * bodyDry.data[i] + 0.7152 * bodyDry.data[i + 1] + 0.0722 * bodyDry.data[i + 2];
+        if (l > 40) pts.push(i);
+      }
+    }
+    return pts;
+  })();
+  const bodyMean = (img) => {
+    let r = 0, g = 0, bl = 0;
+    for (const i of bodyPx) { r += img.data[i]; g += img.data[i + 1]; bl += img.data[i + 2]; }
+    return [r / bodyPx.length, g / bodyPx.length, bl / bodyPx.length];
+  };
+  // How far a colour moved **toward this element's own hue**, in sRGB counts: the change projected
+  // onto the element's chroma direction (its colour with the grey taken out). A plain distance
+  // would score a coat that merely brightened the model, and 水 is not "brighter" — it is
+  // 0x3aa7ff, which is 95 counts of blue and *minus* 102 of red away from neutral.
+  const chromaDir = (() => {
+    const c = [(ELEMENTS[au].color >> 16) & 255, (ELEMENTS[au].color >> 8) & 255, ELEMENTS[au].color & 255];
+    const m = (c[0] + c[1] + c[2]) / 3;
+    const v = c.map((q) => q - m);
+    const n = Math.hypot(...v);
+    return v.map((q) => q / n);
+  })();
+  const toward = (a, b) => +a.reduce((s, v, i) => s + (v - b[i]) * chromaDir[i], 0).toFixed(1);
+  const dryMean = bodyMean(bodyDry);
+  const auraMean = bodyMean(bodyAura);
+  const shownRgb = (v) => v.map((q) => Math.round(q)).join(',');
+  console.log(`  (${withCoat.onBody} px on the body, ${withCoat.offBody} beside it,`
+    + ` ${withCoat.whole.count} px in frame, floor ${floorPx} px; plate luma ${plate.lum};`
+    + ` ${bodyPx.length} body px ${shownRgb(dryMean)} -> ${shownRgb(auraMean)},`
+    + ` ${toward(auraMean, dryMean)} counts toward ${ELEMENTS[au].name})`);
+  // The background both readings are taken over, asserted rather than printed. Two captures of the
+  // same dry body have to be the same picture: when they are not, every count below is measuring
+  // whatever else was moving (a vfx leftover, the vignette's CSS fade, a hit flash decaying), and
+  // the reds that follow name the aura for it.
+  check('the pair was shot over a black, still plate, so the only difference can be the body',
+    plate.lum < 8 && floorPx < 300,
+    `plate luma ${plate.lum}, ${floorPx} px move between two captures of the same dry body`
+    + ` (vignette ${hurtWas} when we froze, damage flash ${flashWas.was})`);
   check('the attachment changed the character on screen, on the body and nowhere else',
-    onBody > 300 && offBody <= 20 && whole.count > 300,
-    `${onBody} px on the body, ${offBody} px in the same box 3.4 m to the side`);
+    withCoat.onBody > Math.max(300, floorPx * 3) && withCoat.offBody <= 20
+    && withCoat.whole.count > 300,
+    `${withCoat.onBody} px on the body, ${withCoat.offBody} px in the same box 3.4 m to the side`
+    + ` (noise floor ${floorPx} px)`);
   // ...and the difference is *where the character is*, not somewhere else in the frame.
-  if (whole.box) {
-    const cx = whole.box.x + whole.box.w / 2, cy = whole.box.y + whole.box.h / 2;
-    const off = Math.hypot(cx - frozen.me.x, cy - frozen.me.y) / frozen.perM;
+  if (withCoat.whole.box) {
+    const cx = withCoat.whole.box.x + withCoat.whole.box.w / 2;
+    const cy = withCoat.whole.box.y + withCoat.whole.box.h / 2;
+    const off = Math.hypot(cx - framed.me.x, cy - framed.me.y) / framed.perM;
     check('...centred on the character rather than anywhere in the frame', off < 1.6,
-      `the changed pixels' centre is ${off.toFixed(2)} m from the character's own projection`);
+      `the changed pixels' centre is ${off.toFixed(2)} m from the character's own projection`
+      + ` (${framed.perM} px/m, so the frame is ${(framed.w / framed.perM).toFixed(1)} m wide)`);
   } else {
     check('...centred on the character rather than anywhere in the frame', false, 'nothing differed');
   }
+  /**
+   * The coat, swept: the term under test moved and nothing else.
+   *
+   * 0 is the build this section was red on — the additive glow alone moved a near-white torso by
+   * 3/255 (208,203,205 -> 208,204,208). The intermediate values are here because the authored
+   * `AURA_WASH` is a number somebody has to choose, and a probe that only knows "0 is bad" cannot
+   * say whether 0.45 was a taste or a measurement. The sweep is printed; the assertions below use
+   * the authored value and 0.
+   */
+  const SWEEP = [0, 0.15, 0.3, 0.6];
+  const wash = await p.evaluate(() => window.__setWash(0));
+  const bodyNoCoat = await shoot('02b-body-aura-nocoat');
+  const noCoat = readBody(bodyNoCoat);
+  const noCoatMean = bodyMean(bodyNoCoat);
+  const sweep = [{ v: wash.was, toward: toward(auraMean, dryMean), px: withCoat.onBody }];
+  for (const v of SWEEP) {
+    const set = await p.evaluate((q) => window.__setWash(q), v);
+    const img = await shoot(`02c-body-wash-${v}`);
+    sweep.push({ v, toward: toward(bodyMean(img), dryMean), px: diffRect(img, bodyDry, bodyBox),
+      n: set.n });
+  }
+  await p.evaluate((v) => window.__setWash(v), wash.was);
+  console.log(`  (coat sweep on ${wash.n} materials, counts toward ${ELEMENTS[au].name}:`
+    + ` ${sweep.sort((a, b) => a.v - b.v).map((s) => `${s.v}→${s.toward}`).join('  ')})`);
+  check('...and it is the coat that does it, not the glow that was already there',
+    wash.n > 10 && wash.was > 0.001
+    && toward(noCoatMean, dryMean) < toward(auraMean, dryMean) * 0.5,
+    `the body moved ${toward(auraMean, dryMean)} counts toward ${ELEMENTS[au].name} with the coat at`
+    + ` ${wash.was} and ${toward(noCoatMean, dryMean)} with it forced to 0 on ${wash.n} materials`
+    + ` (${shownRgb(dryMean)} -> ${shownRgb(auraMean)} / ${shownRgb(noCoatMean)})`);
+  // 13 because the sweep in this same run brackets it from both sides: 0.30 was measured at 11.1
+  // and rejected as still too faint, and the authored 0.45 reads 14.9 here and 17.8-33.2 in the
+  // lab across four azimuths and four exposures. A bar between the setting that was rejected and
+  // the one that was chosen fails a build that quietly turns the coat down.
+  check('...by a distance a player can see, not by three counts of blue',
+    toward(auraMean, dryMean) > 13,
+    `${toward(auraMean, dryMean)} counts of ${ELEMENTS[au].name} over ${bodyPx.length} body pixels`
+    + ` (the glow alone: ${toward(noCoatMean, dryMean)})`);
+  /**
+   * ...measured on the body's own colour, with the damage flash put back to prove it.
+   *
+   * This is the mutation for the pin above, and it is also the whole story of a red run: with the
+   * flash at 0.75 the *same* aura, the same coat and the same camera move the body 3 counts instead
+   * of 15, because `mix(col, vec3(1.0, 0.72, 0.72), uHitFlash)` is the last thing the fragment does
+   * and it scales every term under it by `1 - uHitFlash`. Two consecutive runs of this probe
+   * disagreed on nothing else: 196,193,194 with 14.9 counts, and 225,215,214 with 2.7.
+   */
+  const FLASH_ON = 0.75;
+  await p.evaluate((v) => window.__flash(v), FLASH_ON);
+  const bodyFlash = await shoot('02d-body-hitflash');
+  const flashMean = bodyMean(bodyFlash);
+  const flashBack = await p.evaluate(() => window.__flash(0));
+  check('...on the body\'s own colour, with the damage flash pinned off',
+    flashNow.n > 10 && flashNow.was === 0 && flashBack.was === FLASH_ON
+    && toward(flashMean, dryMean) < toward(auraMean, dryMean) * 0.4,
+    `the flash was ${flashWas.was} when the reaction froze the game and 0 for both captures;`
+    + ` put back at ${FLASH_ON} the same coat moves the body ${toward(flashMean, dryMean)} counts`
+    + ` instead of ${toward(auraMean, dryMean)} (${shownRgb(dryMean)} -> ${shownRgb(flashMean)})`);
 
   /* ------------------------------------------------------------ the HUD pip -- */
 
@@ -670,6 +1009,13 @@ try {
    * 15 px bead over a moving world cannot be told from the world (that is what
    * `hide the canvas to read the HUD` is about). The control is the same bead with `au` stripped
    * from the same row, and the *other* cards' beads, which must not move either way.
+   *
+   * Both frames are taken with the hurt vignette pinned off. It is a full-screen red gradient
+   * whose class only comes off inside `hud.update(dt)`, so on a stopped page it stayed on — and it
+   * came off *between* these two captures, on its own 0.42 s CSS fade. That put a red wash over
+   * one frame and not the other: every rect in the HUD differed, the bead's own centre read
+   * (73,18,19) with the aura on and (68,102,111) with it off, and the frame's top-left corner —
+   * the "control" the old code was accidentally measuring — went 96,17,17 -> 11,13,20.
    */
   await p.evaluate(() => {
     // The isolate hid the HUD to photograph the body; the pip lives there.
@@ -678,6 +1024,9 @@ try {
     return true;
   });
   await p.evaluate(() => window.__canvas(false));
+  // Pinned since the body section (`hurtWas` was read there); re-pinned because the HUD it lives in
+  // was hidden and has just come back.
+  await p.evaluate(() => window.__hurt(false));
   await p.evaluate((el) => window.__setAu(el), au);
   const pipsOn = await p.evaluate(() => window.__pips());
   await sleep(500);
@@ -701,28 +1050,59 @@ try {
     !!activeOff && activeOff.display === 'none',
     JSON.stringify(activeOff));
 
-  const pad = (r, n = 6) => ({ x: r.x - n, y: r.y - n, w: r.w + n * 2, h: r.h + n * 2 });
-  const pipRect = active?.rect ? pad(active.rect) : null;
-  if (pipRect) {
+  // The vignette really was over these frames, and pinning it off really was what removed it:
+  // put it back and see the frame move. Without this the pin is an unproven precaution, and a
+  // build that deleted `.hurt` altogether would look the same as one where it was handled.
+  if (hurtWas == null) {
+    skip('the hurt vignette was pinned off, so the bead is measured against the panel',
+      'the page has no .hurt element to pin');
+  } else {
+    await p.evaluate(() => window.__hurt(true));
+    await sleep(120);
+    const hudHurt = await cap('03b-hud-hurt');
+    await p.evaluate(() => window.__hurt(false));
+    const covered = diffMask(hudHurt, hudAura, 8).count;
+    const frame = hudAura.width * hudAura.height;
+    console.log(`  (hurt vignette: opacity ${hurtWas} when we arrived;`
+      + ` showing it again moves ${covered} px of ${frame})`);
+    check('the hurt vignette was pinned off, so the bead is measured against the panel',
+      covered > frame * 0.25,
+      `${covered} px of ${frame} move when it is put back (opacity found: ${hurtWas})`);
+  }
+
+  // The bead's rect derived from the avatar it is positioned against, not from its own
+  // `getBoundingClientRect()`: an off-field card's pip is `display: none`, so its own rect is
+  // 0x0 at 0,0 and the old `pad(rect, 6)` turned the control into `-6,-6 12x12` — the HUD's
+  // top-left corner, which is not a pip on any card and moved 96,17,17 -> 11,13,20 on the
+  // vignette alone.
+  const pipRect = active?.box;
+  const ctrlRects = others.map((c) => c.box).filter(Boolean);
+  if (pipRect && ctrlRects.length) {
     const onPip = diffRect(hudAura, hudDry, pipRect);
-    const ctrl = others.filter((c) => c.rect).map((c) => diffRect(hudAura, hudDry, pad(c.rect)));
+    const ctrl = ctrlRects.map((r) => diffRect(hudAura, hudDry, r));
     console.log(`  (pip rect ${pipRect.x},${pipRect.y} ${pipRect.w}x${pipRect.h}: ${onPip} px differ;`
-      + ` the other cards' pips ${ctrl.join('/')} px)`);
+      + ` where the other cards' pips would be ${ctrl.join('/')} px)`);
     check('the pip is painted, and only the active card\'s',
       onPip > 60 && ctrl.every((n) => n === 0),
-      `${onPip} px on it, ${ctrl.join('/')} px on the others`);
+      `${onPip} px on it, ${ctrl.join('/')} px where the others' would be`);
+    // The bead's hue, as the **signed difference** the bead itself makes: on minus off, over the
+    // same 15x15. The absolute mean of that rect is mostly the panel and the dark glyph
+    // (#0d1018 on the element's fill), so a mean can carry the panel's ordering rather than the
+    // element's; the delta is only what appeared when the wire started sending `au`.
     const lit = rectStats(hudAura, { ...pipRect, label: 'pip' });
+    const unlit = rectStats(hudDry, { ...pipRect, label: 'pip-off' });
+    const delta = lit.rgb.map((v, i) => v - unlit.rgb[i]);
     const el = ELEMENTS[au].color;
-    // The bead's own colour, in the frame. Its glyph is dark (#0d1018) on the element's fill, so
-    // the mean of the padded rect is the fill pulled toward the HUD's dark panel — which is why
-    // this asks about the *ordering* of the channels rather than for the hex back.
     const chan = [(el >> 16) & 255, (el >> 8) & 255, el & 255];
     const order = (v) => v.map((_, i) => i).sort((a, c) => v[c] - v[a]).join('');
-    check('...in the element\'s own hue', order(lit.rgb) === order(chan),
-      `pip mean rgb ${lit.rgb.map((v) => Math.round(v)).join(',')} against`
+    const shown = (v) => v.map((n) => Math.round(n)).join(',');
+    check('...in the element\'s own hue',
+      order(delta) === order(chan) && Math.max(...delta) > 8,
+      `the bead adds ${shown(delta)} (${shown(unlit.rgb)} -> ${shown(lit.rgb)}) against`
       + ` ${ELEMENTS[au].name} 0x${el.toString(16)} (${chan.join(',')})`);
   } else {
-    check('the pip is painted, and only the active card\'s', false, 'the pip has no rect');
+    check('the pip is painted, and only the active card\'s', false,
+      `pip box ${JSON.stringify(pipRect)}, ${ctrlRects.length} control boxes`);
   }
   await p.evaluate(() => window.__canvas(true));
 
@@ -762,6 +1142,23 @@ try {
   // frame is 300+ px of "something differed" that has nothing to do with the effect.
   await p.evaluate(() => window.__hideMe());
   await p.evaluate(() => window.__canon());
+  // ...and the HUD hidden again. `__isolate` had put it away; the pip section above put it back to
+  // photograph the bead, and nothing took it down. With it in frame the phase diffs were reading
+  // the HUD's own 「感电」 banner — 2544 px in a 71x40 box above the player, still up 1.2 s later
+  // because that banner's life has nothing to do with the effect's, which is `flash(…, 0.18)` and
+  // four `coneSparks(…, 0.15)`.
+  const hudGone = await p.evaluate(() => {
+    const el = document.querySelector('[data-hud]');
+    if (el) el.style.display = 'none';
+    return el ? getComputedStyle(el).display : 'missing';
+  });
+  check('the HUD is out of frame, so the phases below measure the effect and not a banner',
+    hudGone === 'none', `[data-hud] computed display is ${hudGone}`);
+  // And keep the vignette pinned off across the phases. `__fire` replays the payload, which puts
+  // `.hurt.on` back, and on a stopped page nothing ever takes it off again — that is why the frame
+  // 1.2 s after the reaction still differed from the pre-hit plate across 451338 px, three orders
+  // of magnitude over the bar, while the effect itself had long finished.
+  const hurtPhase = await p.evaluate(() => window.__hurt(false));
   let before = null, plate2 = null;
   for (let i = 0; i < 6; i++) {
     await p.evaluate(() => window.__step(0));
@@ -776,16 +1173,21 @@ try {
 
   const PHASES = [0.05, 0.20, 0.45, 1.20];
   await p.evaluate(() => window.__fire(false));
+  await p.evaluate(() => window.__hurt(false));
   const shots = [];
   let at = 0;
   for (const t of PHASES) {
-    await p.evaluate((n) => window.__step(n), Math.round((t - at) * 60));
+    // Through `shoot`, so each phase is a frame that was actually painted. Stepping and
+    // screenshotting back to back gave `06-0.05s.png` byte-identical to `05-before.png` — a
+    // reading of exactly 0 px, which looks like "the reaction drew nothing" and is really
+    // "the compositor had not caught up".
+    shots.push({ t, img: await shoot(`06-${t.toFixed(2)}s`, Math.round((t - at) * 60)) });
     at = t;
-    shots.push({ t, img: await cap(`06-${t.toFixed(2)}s`) });
   }
   const rec = await p.evaluate(() => ({ cues: window.__cues, react: window.__react }));
   const grew = shots.map((s) => diffMask(s.img, before, 8));
-  console.log(`  phases: ${shots.map((s, i) => `${s.t}s ${grew[i].count}px`).join('  ')}`);
+  console.log(`  phases: ${shots.map((s, i) => `${s.t}s ${grew[i].count}px`).join('  ')}`
+    + `  (vignette opacity when the payload re-fired: ${hurtPhase})`);
   check('the reaction the server sent drew light on screen', grew[0].count > 800,
     `${grew[0].count} px at ${PHASES[0]} s`
     + `${grew[0].box ? `, box ${grew[0].box.w}x${grew[0].box.h}` : ''}`);
@@ -796,21 +1198,76 @@ try {
   // branch also draws the hit itself (and the shield shell when one is up), so this subtraction is
   // what makes the number "the reaction's".
   await p.evaluate(() => window.__fire(true));
-  await p.evaluate((n) => window.__step(n), Math.round(PHASES[1] * 60));
-  const plain = await cap('07-plain');
+  await p.evaluate(() => window.__hurt(false));
+  const plain = await shoot('07-plain', Math.round(PHASES[1] * 60));
   const own = diffMask(shots[1].img, plain, 8);
   check('...and it is the reaction\'s own light, not the hit\'s', own.count > 800,
     `${own.count} px over the same payload with \`reaction\` taken off`);
 
-  // Where. In metres, through the camera the freeze measured.
-  const box = own.box || grew[1].box;
-  const cx = box.x + box.w / 2, cy = box.y + box.h / 2;
-  const dMe = Math.hypot(cx - frozen.me.x, cy - frozen.me.y) / frozen.perM;
+  // Where. In metres, through **the camera these frames were taken with** — not the one the freeze
+  // measured, which was 1.52 m from the chest and has since been pushed back to frame the body.
+  // A projection from before the boom moved describes a picture nobody took.
+  const view = await p.evaluate(() => window.__proj());
+  // ...and the subject has to still be in it. The body section left the boom 4.6 m from the chest;
+  // a run whose party was downed mid-soak was later respawned at a statue, and this same reading
+  // came back "camera 202.25 m, me at -1771.9,45.1" — every distance-from-the-player below then
+  // describes a point that is not in the picture. Cheap to assert, and it fails on the cause rather
+  // than on the symptom (that run's red was "the light was drawn 183.14 m from me").
+  check('the character is still in the frame these phases are measured against',
+    view.dist < 12 && view.me.x >= 0 && view.me.x <= view.w && view.me.y >= 0 && view.me.y <= view.h,
+    `camera ${view.dist} m from the chest, me at ${view.me.x.toFixed(0)},${view.me.y.toFixed(0)}`
+    + ` in ${view.w}x${view.h}`);
+
+  /**
+   * Where the light is, weighted by how much light it is.
+   *
+   * Not the diff's bounding box. A player taking a hit floods the **entire viewport** with a flat
+   * wash — 05-before is rgb 2,4,12 and every pixel of the 0.05 s frame sits on 0,26,57, so
+   * `diffMask` returns all 655 360 px and a box of 1024x640 whose centre is the centre of the
+   * frame. And `__frameBody` centres the camera on the character, so "the effect's centre is
+   * 0.05 m from my own projection" was arithmetic about the viewport, true no matter what the
+   * reaction drew or where. (The flood and the hard-edged square flashes it sits inside are their
+   * own defect — `flash()` is an untextured `PlaneGeometry` — and their own unit.)
+   *
+   * So the threshold comes out of the frame being measured: the flood is uniform, so a corner far
+   * from the player reads its level, and only pixels well above it count as the effect. The mask's
+   * size is printed next to the whole-frame count, which is what makes the flood visible instead of
+   * silently carrying the measurement.
+   */
+  const lumOf = (im, i) => 0.2126 * im.data[i] + 0.7152 * im.data[i + 1] + 0.0722 * im.data[i + 2];
+  const litAt = (img, base) => {
+    const corner = { x: 0, y: 0, w: 96, h: 96, label: 'flood' };
+    const flood = rectStats(img, corner).lum - rectStats(base, corner).lum;
+    const bar = Math.max(24, flood + 30);
+    let sw = 0, sx = 0, sy = 0, n = 0;
+    for (let y = 0; y < img.height; y++) {
+      for (let x = 0; x < img.width; x++) {
+        const i = (y * img.width + x) * 4;
+        const d = lumOf(img, i) - lumOf(base, i);
+        if (d <= bar) continue;
+        sx += x * d; sy += y * d; sw += d; n++;
+      }
+    }
+    return { flood: +flood.toFixed(1), bar: +bar.toFixed(1), n,
+      x: n ? sx / sw : null, y: n ? sy / sw : null };
+  };
+  // On the peak frame, which is the one the presence assertion above is about.
+  const lit = litAt(shots[0].img, before);
+  console.log(`  (measured through the camera at ${view.dist} m: ${view.perM} px/m,`
+    + ` me at ${view.me.x},${view.me.y}; the ${PHASES[0]} s frame floods the whole viewport by`
+    + ` ${lit.flood} luma, so the light is the ${lit.n} px above ${lit.bar})`);
+  if (!check('the reaction\'s light is a shape in the frame, not the whole frame',
+    lit.n > 200 && lit.n < shots[0].img.width * shots[0].img.height * 0.5,
+    `${lit.n} px are more than ${lit.bar} luma brighter than the pre-hit frame`)) {
+    throw new Error('nothing to locate');
+  }
+  const cx = lit.x, cy = lit.y;
+  const dMe = Math.hypot(cx - view.me.x, cy - view.me.y) / view.perM;
   check('the light was drawn at the player', dMe < 2.5,
     `the effect's centre is ${dMe.toFixed(2)} m from my own projection`
-    + ` (${cx.toFixed(0)},${cy.toFixed(0)} against ${frozen.me.x},${frozen.me.y})`);
-  const srcPt = frozen.src?.at;
-  const apart = srcPt ? Math.hypot(srcPt.x - frozen.me.x, srcPt.y - frozen.me.y) : null;
+    + ` (${cx.toFixed(0)},${cy.toFixed(0)} against ${view.me.x},${view.me.y})`);
+  const srcPt = view.srcAt;
+  const apart = srcPt ? Math.hypot(srcPt.x - view.me.x, srcPt.y - view.me.y) : null;
   if (!srcPt || Math.abs(srcPt.z) > 1) {
     skip('...rather than at the creature that hit me', 'the attacker has no screen position');
   } else if (apart < 80) {
@@ -818,7 +1275,7 @@ try {
       `it was ${apart.toFixed(0)} px away on screen — a melee attacker standing on top of me`
       + ' cannot tell the two apart');
   } else {
-    const dSrc = Math.hypot(cx - srcPt.x, cy - srcPt.y) / frozen.perM;
+    const dSrc = Math.hypot(cx - srcPt.x, cy - srcPt.y) / view.perM;
     check('...rather than at the creature that hit me', dMe < dSrc,
       `${dMe.toFixed(2)} m from me, ${dSrc.toFixed(2)} m from ${frozen.src.name}`
       + ` (${apart.toFixed(0)} px apart on screen)`);

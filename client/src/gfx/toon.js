@@ -25,6 +25,7 @@ uniform vec3  uSpecColor;
 uniform float uEmissivePulse;
 uniform float uElementGlow;
 uniform vec3  uElementColor;
+uniform float uElementWash;
 uniform float uTime;
 uniform float uHitFlash;
 uniform float uDissolve;
@@ -329,9 +330,33 @@ const TOON_FRAG = /* glsl */`
   col += uRimColor * rim * uRimStrength;
 
   // --- elemental aura --------------------------------------------------------
+  float auraPulse = 0.65 + 0.35 * sin(uTime * 4.5 + vToonWorld.y * 1.6);
   if (uElementGlow > 0.001) {
-    float pulse = 0.65 + 0.35 * sin(uTime * 4.5 + vToonWorld.y * 1.6);
-    col += uElementColor * uElementGlow * (rim * 1.6 + 0.22) * pulse;
+    col += uElementColor * uElementGlow * (rim * 1.6 + 0.22) * auraPulse;
+  }
+  // 元素附着 on a *body*: a coat, not a light.
+  //
+  // The additive term above is the resting glow, and on a pale character it is invisible. A
+  // traveller with 水 attached (glow 0.42) measured 3/255 bluer across the torso than a dry one
+  // at the resting 0.10 -- 208,203,205 -> 208,204,208 -- because rim is ~0 everywhere but the
+  // silhouette, leaving a 0.22 floor to add to a body already sitting where the tone curve has
+  // almost no room left. Adding light to white cannot colour it; taking light away from two
+  // channels can. So an attachment mixes the body *toward* the element instead: bounded by
+  // construction, and modulated by the body's own luminance so the cel bands, the shadow side and
+  // the outline all still read through the coat.
+  //
+  // Separate uniform rather than a curve on uElementGlow, because the resting glow is the
+  // operating point every enemy sheet and character shot was calibrated on: at uElementWash 0
+  // this block is exactly nothing and those frames stay bit-identical.
+  //
+  // The damage flash at the bottom of this shader overrides the coat, on purpose: mixing the body
+  // toward pink is the last thing that happens, so a hit whites out the attachment along with
+  // everything else for its 0.2 s. Worth knowing when measuring: pinned at 0.75 it turns this
+  // coat's 15 counts into 2.7, which is how the same build read 58/0 and 55/3 on two runs.
+  if (uElementWash > 0.001) {
+    float bodyLum = dot(col, vec3(0.299, 0.587, 0.114));
+    vec3 coat = uElementColor * (0.35 + 0.9 * bodyLum);
+    col = mix(col, coat, uElementWash * (0.78 + 0.22 * auraPulse));
   }
   // Emissive pulse (used for weakspots / boss phase changes)
   col += totalEmissiveRadiance * (1.0 + uEmissivePulse * sin(uTime * 8.0) * 0.5);
@@ -392,6 +417,7 @@ export function toonMaterial(opts = {}) {
     uEmissivePulse: { value: 0 },
     uElementGlow: { value: 0 },
     uElementColor: { value: new THREE.Color(0xffffff) },
+    uElementWash: { value: 0 },
     uTime: sharedTime,
     uHitFlash: { value: 0 },
     uDissolve: { value: 0 },
@@ -434,13 +460,20 @@ export function toonMaterial(opts = {}) {
   return mat;
 }
 
-/** Set the elemental aura glow on any toon material (or a whole subtree). */
-export function setAura(objOrMat, colorHex, strength) {
+/**
+ * Set the elemental aura glow on any toon material (or a whole subtree).
+ *
+ * `wash` is 元素附着's coat (see TOON_FRAG) and, like `colorHex`, is left alone when it is not
+ * passed: the burst pulse re-calls this every frame with only a new strength, and a default of 0
+ * there would drop the attachment's coat on the first pulsed frame.
+ */
+export function setAura(objOrMat, colorHex, strength, wash) {
   const apply = (m) => {
     const u = m?.userData?.toon;
     if (!u) return;
     u.uElementGlow.value = strength;
     if (colorHex != null) u.uElementColor.value.setHex(colorHex);
+    if (wash != null) u.uElementWash.value = wash;
   };
   if (objOrMat?.isMaterial) return apply(objOrMat);
   objOrMat?.traverse?.((o) => {

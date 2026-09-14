@@ -31,6 +31,20 @@ const MISSING_GRACE = 4;      // snapshots an actor may be absent before disposa
 // named constant because `setElementAura` has to be able to return to exactly it: an attachment
 // that cleared to 0 would leave the model dimmer than the one the enemy sheet was calibrated on.
 const REST_AURA = 0.10;
+// How far an *attachment* pulls the body toward the element's own colour. The additive glow above
+// cannot do this job on a pale model (a soaked traveller read 3/255 bluer than a dry one), so the
+// attachment carries a bounded mix as well — see TOON_FRAG's 元素附着 block. Frozen is heavier
+// because 冻结 is meant to stop the model reading as itself at all.
+//
+// 0.45 rather than a round 0.3: measured on 莉拉 soaked in a camp at noon, over the 8-10k body
+// pixels a 4.6 m camera gives her, with the damage flash pinned off — a flash frozen at 0.75 is a
+// pink body, and it eats the coat whole (0.45 read 2.7 counts instead of 15). The body's mean
+// colour moves toward the element's own hue by 3.5-8 counts on the glow alone, 11-26 at wash 0.30
+// and 15-34 at 0.45; the spread is how much room the body already has (a dry mean of 133 has some,
+// 196 has less). `player-aura-check` prints the sweep it measured, so this number is a row in a
+// table rather than a taste.
+const AURA_WASH = 0.45;
+const AURA_WASH_FROZEN = 0.62;
 
 const EMPTY = [];
 
@@ -105,7 +119,7 @@ export class CharacterActor {
     }
     // The element aura is subtle at rest and pushed up during a burst.
     this.baseAuraStrength = REST_AURA;
-    setAura(this.rig.group, ELEMENTS[def.element]?.color ?? 0xffffff, this.baseAuraStrength);
+    setAura(this.rig.group, ELEMENTS[def.element]?.color ?? 0xffffff, this.baseAuraStrength, 0);
     // ...unless something is *attached* to this body right now. A party switch rebuilds the
     // model, and the aura belongs to the player, not to the character standing on the field —
     // 湿身 does not dry off because you pressed 2.
@@ -131,8 +145,11 @@ export class CharacterActor {
     this.aura = want;
     if (!this.rig) return;
     this.baseAuraStrength = want ? (frozen ? 0.85 : 0.42) : REST_AURA;
+    // The coat is what makes an attachment legible on a body (see TOON_FRAG's 元素附着 block);
+    // the resting glow carries none, so a cleared aura goes back to exactly the authored model.
     setAura(this.rig.group, want ? elementColor(want)
-      : (ELEMENTS[this.def?.element]?.color ?? 0xffffff), this.baseAuraStrength);
+      : (ELEMENTS[this.def?.element]?.color ?? 0xffffff), this.baseAuraStrength,
+    want ? (frozen ? AURA_WASH_FROZEN : AURA_WASH) : 0);
   }
 
   _disposeModel() {
@@ -235,10 +252,11 @@ export class EnemyActor {
     this.aura = want;
     if (!want) {
       this._auraStrength = 0;
-      setAura(this.group, 0xffffff, 0);
+      setAura(this.group, 0xffffff, 0, 0);
     } else {
       this._auraStrength = frozen ? 0.85 : 0.42;
-      setAura(this.group, elementColor(want), this._auraStrength);
+      setAura(this.group, elementColor(want), this._auraStrength,
+        frozen ? AURA_WASH_FROZEN : AURA_WASH);
     }
   }
 
