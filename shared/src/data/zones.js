@@ -775,6 +775,19 @@ export function npcRoleName(role) { return NPC_ROLES[role] || ''; }
 export const CHAMBER_WAVE_GAP = 4;
 
 /**
+ * Where a floor's waves spawn: a ring of `CHAMBER_RING` metres about `CHAMBER_ARENA`.
+ *
+ * Named rather than inline in `_spawnWave` because the arena's centre is the one place in a
+ * dungeon anything happens, and two consumers outside the spawner need it. A hilichurl's
+ * aggro radius is 16 m and `chamberEntry` puts the party down ~50 m away, so a party that
+ * has not walked in is not being fought at all — `tools/mp-check.mjs` used to walk them in
+ * *after* pressing start and spent 13 of the floor's 90 seconds on the journey, which left
+ * the wipe it was testing 3.7 s ahead of the clock. Now it walks to this point first.
+ */
+export const CHAMBER_ARENA = { x: 0, z: -8 };
+export const CHAMBER_RING = 14;
+
+/**
  * Every enemy a floor spawns, all waves flattened.
  *
  * `waves` is the *only* chamber shape — there is no `enemies` fallback here on purpose.

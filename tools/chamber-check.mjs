@@ -179,6 +179,18 @@ const chamberEvents = (evts, state) => evts.filter((e) => e.t === S2C.CHAMBER &&
 const killAll = (inst) => {
   for (const e of inst.enemies.values()) if (e.alive) e.takeDamage(1e9, 1, inst.now);
 };
+/**
+ * Down a player through the simulation, the way a hit does.
+ *
+ * One lethal hit is not a death: `PlayerEntity.takeDamage` swaps to the next party member with
+ * hp left and only clears `alive` when there is none, so a probe that hits once is asserting on
+ * a state the game never reaches. Loop until the party is out, and return whether it worked
+ * rather than trusting it.
+ */
+const down = (inst, p) => {
+  for (let i = 0; i < 8 && p.alive; i++) p.takeDamage(p.maxHp() * 99, inst.now);
+  return !p.alive;
+};
 /** Advance the clock and run the chamber state machine, without the 20 Hz timer. */
 const advance = (inst, dt) => { inst.now += dt; inst.updateChamber(); };
 
@@ -237,9 +249,65 @@ const advance = (inst, dt) => { inst.now += dt; inst.updateChamber(); };
   inst.startChamber(c.floor);
   drain(inst);
   advance(inst, c.timeLimit + 1);
-  const failed = chamberEvents(drain(inst), 'failed')[0];
-  ok('running out of time fails the floor', inst.chamber.state === 'failed' && !!failed,
-    JSON.stringify(failed?.d));
+  const failed = chamberEvents(drain(inst), 'failed');
+  ok('running out of time fails the floor', inst.chamber.state === 'failed' && failed.length === 1,
+    `${failed.length} event(s): ${JSON.stringify(failed[0]?.d)}`);
+  // `remaining` counts the wave being fought, not the floor's whole roster — nothing was killed
+  // here, so it is wave 1 entire, and floor 2's other 3 enemies were never spawned. It is also
+  // the only thing the 挑战失败 banner can say about a timeout, so it must be a number and the
+  // run must *not* claim a wipe: nobody was down.
+  ok('...and says how many of the wave were left, which is all a timeout can explain',
+    failed[0]?.d.remaining === c.waves[0].length && failed[0]?.d.reason === undefined,
+    `remaining ${failed[0]?.d.remaining} of wave 1's ${c.waves[0].length}`
+    + ` (${chamberEnemies(c).length} on the floor), reason ${failed[0]?.d.reason}`);
+}
+{
+  // The third ending, and the one co-op adds: the party is wiped. Until now it was tested only
+  // by `tools/mp-check.mjs`, which has to *earn* a wipe by standing two level-1 guests in a
+  // level-18 arena for eighty seconds — so the only coverage of this branch was a race that the
+  // clock won about half the time. The states are constructible here, so construct them.
+  //
+  // Three claims, and the first is what makes the other two mean anything: one player down is
+  // not a wipe. Without it `allDown` could be `.some((p) => !p.alive)` and still look right.
+  const c = ZONES.abyssTrial.chambers[0];
+  const { inst, p } = arena();
+  const mate = inst.addPlayer(2, 'p2', {
+    playerId: 2, party: ['ignar'], activeSlot: 0, zone: 'abyssTrial', pos: { x: 2, y: 6, z: -8, ry: 0 },
+  }, { ignar: statsFor('ignar') });
+  inst.startChamber(c.floor);
+  drain(inst);
+  advance(inst, 6);
+  down(inst, p);
+  advance(inst, 0.05);
+  ok('one player down of two does not lose the run',
+    inst.chamber.state === 'running' && chamberEvents(drain(inst), 'failed').length === 0,
+    `${inst.chamber.state}, p1 alive=${p.alive} p2 alive=${mate.alive}`);
+  down(inst, mate);
+  advance(inst, 0.05);
+  const wipe = chamberEvents(drain(inst), 'failed');
+  ok('...and the whole party down loses it, once, on the mechanic',
+    inst.chamber.state === 'failed' && wipe.length === 1 && wipe[0].d.reason === 'wiped',
+    `${wipe.length} event(s): ${JSON.stringify(wipe[0]?.d)}`);
+  ok('...with the arena emptied, so the respawned party is not hunted at the entry',
+    [...inst.enemies.values()].filter((e) => e.alive).length === 0 && inst.projectiles.size === 0,
+    `${inst.enemies.size} enemies, ${inst.projectiles.size} projectiles`);
+}
+{
+  // The tie, which is the whole reason the two endings are asked in this order. The last player
+  // falls on a tick the clock has already run past — the arithmetic mp-check kept losing by 3.7 s
+  // — and a party lying on the floor must be told it was wiped, not 「剩余敌人 3」, and told once.
+  // `client/src/game/game.js` is the only reader of either field and it prints one banner per
+  // event, so two events is two banners with two different stories.
+  const c = ZONES.abyssTrial.chambers[0];
+  const { inst, p } = arena();
+  inst.startChamber(c.floor);
+  drain(inst);
+  down(inst, p);            // downed, but no tick has looked at the party yet
+  advance(inst, c.timeLimit + 1);
+  const evts = chamberEvents(drain(inst), 'failed');
+  ok('a wipe that lands past the time limit is still a wipe, and still one event',
+    evts.length === 1 && evts[0].d.reason === 'wiped',
+    `${evts.length} event(s): ${evts.map((e) => JSON.stringify(e.d)).join(' + ')}`);
 }
 {
   // A run in progress is not restartable — and the rule has two sides, because the same

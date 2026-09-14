@@ -14,7 +14,8 @@
 // Node 22's own global WebSocket and fetch, so this runs from the repo root with no
 // node_modules of its own — `@teyvat/shared` is only linked inside server/ and client/.
 import { C2S, S2C } from '../shared/src/protocol.js';
-import { ZONES } from '../shared/src/data/zones.js';
+import { ZONES, CHAMBER_ARENA, CHAMBER_RING } from '../shared/src/data/zones.js';
+import { ENEMIES } from '../shared/src/data/enemies.js';
 
 const HOST = process.argv[2] || '127.0.0.1:8787';
 const ZONE = 'mondstadt';
@@ -535,6 +536,27 @@ const expectedErrors = new Set();
   ok('floor 2 is locked until floor 1 is cleared',
     !!(await waitWhere(ca, S2C.ERROR, (e) => e.error === 'previous_floor_locked', 5000)));
 
+  // Walk to the arena *before* the clock starts.
+  //
+  // `chamberEntry` puts the party down ~50 m from `CHAMBER_ARENA`, and this probe used to press
+  // start and then walk, so 13 of floor 1's 90 seconds were spent on the journey — and the wipe
+  // it is here to test beat the timeout by 3.7 s. That is a coin toss, and the suite duly lost
+  // it once (`A failed/undefined, B failed/undefined`): a run that ends on the clock says
+  // nothing about the mechanic. The waves spawn on a ring about `CHAMBER_ARENA` whenever they
+  // spawn, so the walk does not need them to exist yet — it needs the ring's centre, which is
+  // now a named constant instead of a `- 8` inside the spawner.
+  await Promise.all([approach(ca, a, CHAMBER_ARENA.x, CHAMBER_ARENA.z),
+    approach(cb, b, CHAMBER_ARENA.x, CHAMBER_ARENA.z)]);
+  const distTo = (c, acc, x, z) => {
+    const me = posOf(c, acc);
+    return me ? Math.hypot(me.x - x, me.z - z) : NaN;
+  };
+  const inArena = [distTo(ca, a, CHAMBER_ARENA.x, CHAMBER_ARENA.z),
+    distTo(cb, b, CHAMBER_ARENA.x, CHAMBER_ARENA.z)];
+  ok('both players stand in the arena before anybody presses start',
+    inArena.every((d) => d < 8),
+    `A ${inArena[0].toFixed(1)} m from the arena centre, B ${inArena[1].toFixed(1)} m`);
+
   ca.send(C2S.START_CHAMBER, { floor: 1 });
   const startA = await waitWhere(ca, S2C.CHAMBER, (m) => m.state === 'start', 6000);
   const startB = await waitWhere(cb, S2C.CHAMBER, (m) => m.state === 'start', 6000);
@@ -552,27 +574,51 @@ const expectedErrors = new Set();
     cea.size > 0 && cea.size === ceb.size && [...cea].every((id) => ceb.has(id)),
     `A=${cea.size} B=${ceb.size} common=${[...cea].filter((id) => ceb.has(id)).length}`);
 
-  // The entry anchor is 50 m from the arena and a hilichurl's aggro radius is 16 m, so a party
-  // that never walks in is never fought — the run would end on the clock, not on the mechanic
-  // under test. Both walk to the wave, and to the same spot: the wipe is the assertion, so both
-  // have to be in it.
-  const arena = (ca.got(S2C.SNAPSHOT).at(-1).enemies || [])[0] || { x: 0, z: -8 };
-  await Promise.all([approach(ca, a, arena.x, arena.z), approach(cb, b, arena.x, arena.z)]);
-  ok('both players reached the arena', [ca, cb].every((c, i) => {
-    const me = posOf(c, i ? b : a);
-    return me && Math.hypot(me.x - arena.x, me.z - arena.z) < 20;
-  }), `A ${JSON.stringify(posOf(ca, a) && [Math.round(posOf(ca, a).x), Math.round(posOf(ca, a).z)])}`
-    + ` B ${JSON.stringify(posOf(cb, b) && [Math.round(posOf(cb, b).x), Math.round(posOf(cb, b).z)])}`
-    + ` arena ${Math.round(arena.x)},${Math.round(arena.z)}`);
+  // ...and the wave spawned around them, close enough to fight. The ring is `CHAMBER_RING` m
+  // and a hilichurl's aggro is 16, so the centre is inside two of wave 1's three — this
+  // asks each player about the nearest enemy's *own* radius rather than about a number this
+  // probe made up, because "they reached the arena" and "the fight has started" are different
+  // claims and only the second one buys the wipe below.
+  const engaged = [[ca, a], [cb, b]].map(([c, acc]) => {
+    const me = posOf(c, acc);
+    const list = (c.got(S2C.SNAPSHOT).at(-1).enemies || []);
+    let best = { slack: Infinity };
+    for (const e of list) {
+      const aggro = ENEMIES[e.t]?.aggro ?? 0;
+      const d = Math.hypot(me.x - e.x, me.z - e.z);
+      if (d - aggro < best.slack) best = { slack: d - aggro, d, aggro, t: e.t };
+    }
+    return best;
+  });
+  ok('...and the wave spawns inside its own aggro radius of both of them',
+    engaged.every((e) => e.slack <= 0),
+    engaged.map((e, i) => `${'AB'[i]} ${e.d?.toFixed(1)} m from a ${e.t} that aggros at ${e.aggro}`)
+      .join(', ') + `, on a ${CHAMBER_RING} m ring`);
 
   // Nobody swings: two level-1 guests in a level-18 chamber are a wipe, which is the failure
   // path co-op adds — the run ends when *everyone* is down, not when the first player falls.
   // A lost run must pay nobody, which is the mirror of `handleChamberClear` paying everybody.
   const failA = await waitWhere(ca, S2C.CHAMBER, (m) => m.state === 'failed', 100000);
   const failB = await waitWhere(cb, S2C.CHAMBER, (m) => m.state === 'failed', 20000);
+  // With the margin, printed and asserted, because this reading races the clock and a race with
+  // no margin is a coin toss nobody can see. `timeLeft` off the last snapshot before the fail is
+  // how much of the limit was still unspent when the party fell; the timeout ending would have
+  // spent all of it. It measured 3.7 s of 90 while this probe walked in on the clock, so it
+  // failed for the wrong reason about half the time; walking in first bought the whole journey
+  // back. Bounded both ways: too little slack and this is a coin toss again, but too *much*
+  // would mean two level-1 guests died to a level-18 wave in a handful of seconds, which would
+  // say the party was never really fighting — the point of standing them in the ring.
+  const limit = ZONES.abyssTrial.chambers[0].timeLimit;
+  const left = [...ca.got(S2C.SNAPSHOT)].reverse()
+    .find((s) => s.chamber?.timeLeft != null)?.chamber?.timeLeft
+    ?? [...ca.got(S2C.CHAMBER)].reverse().find((m) => m.timeLeft != null)?.timeLeft;
   ok('the run is lost only once the whole party is down, and both are told',
     !!failA && !!failB && failA.reason === 'wiped' && failB.reason === 'wiped',
-    `A ${failA?.state}/${failA?.reason}, B ${failB?.state}/${failB?.reason}`);
+    `A ${failA?.state}/${failA?.reason}, B ${failB?.state}/${failB?.reason}`
+    + `, ${left == null ? 'time left unknown' : `${left}s of the limit still unspent`}`);
+  ok('...and it lost to the wave with the clock to spare, not in a photo finish',
+    left != null && left >= 10 && left <= limit - 20,
+    `${left}s of the ${limit}s limit unspent — the fight took ${(limit - left).toFixed(1)}s`);
   ok('a lost run pays nobody',
     !ca.got(S2C.CHAMBER).some((m) => m.state === 'reward')
     && !cb.got(S2C.CHAMBER).some((m) => m.state === 'reward'));

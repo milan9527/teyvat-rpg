@@ -8,7 +8,9 @@
 
 import { Enemy, Projectile, PlayerEntity, groundEntity, moveToward, r2 } from './entity.js';
 import { ENEMIES, ATTACK_MOVES, AI, attackShape } from '../data/enemies.js';
-import { ZONES, heightAt, findWalkable, CHAMBER_WAVE_GAP, chamberStars } from '../data/zones.js';
+import {
+  ZONES, heightAt, findWalkable, CHAMBER_WAVE_GAP, CHAMBER_ARENA, CHAMBER_RING, chamberStars,
+} from '../data/zones.js';
 import { disorderById, disorderInfo } from '../data/disorders.js';
 import { computeDamage, defMultiplier, resMultiplier } from '../sim/formulas.js';
 import { AMPLIFYING, resolveReaction, REACTIONS } from '../data/elements.js';
@@ -203,8 +205,9 @@ export class ZoneInstance {
       // Each wave is rotated a little so the second one does not walk in along the exact
       // footsteps of the first.
       const a = (i / list.length) * Math.PI * 2 + c.wave * 0.7;
-      const r = list.length > 1 ? 14 : 0;
-      const e = this.spawnEnemy(id, c.def.level, Math.cos(a) * r, Math.sin(a) * r - 8,
+      const r = list.length > 1 ? CHAMBER_RING : 0;
+      const e = this.spawnEnemy(id, c.def.level,
+        CHAMBER_ARENA.x + Math.cos(a) * r, CHAMBER_ARENA.z + Math.sin(a) * r,
         { homeRadius: 60, hpMul });
       if (e) ids.push(e.id);
     });
@@ -278,19 +281,30 @@ export class ZoneInstance {
       this.hooks.onChamberClear?.(this, c.floor, time, stars);
       return;
     }
-    if (elapsed > c.timeLimit) {
-      c.state = 'failed';
-      this.emit(S2C.CHAMBER, { state: 'failed', floor: c.floor, remaining: c.ids.size });
-      this.enemies.clear();
-    }
+    // The two ways a run ends badly, and they are exclusive: one run, one ending, one event.
+    //
+    // The wipe is asked *first* and the clock second, because a tie has to name the mechanic
+    // rather than the deadline. These two used to be independent `if`s in the other order, so a
+    // tick on which the last player fell after the limit had passed emitted `failed` twice —
+    // once with `remaining` and once with `reason: 'wiped'` — and the only reader of either
+    // (`client/src/game/game.js`, the 挑战失败 banner) told a party lying on the floor
+    // 「剩余敌人 3」 and then told them again. The clock cannot be the more specific answer:
+    // a party that is entirely down has already lost, whatever the clock says.
     const allDown = this.players.size > 0 && [...this.players.values()].every((p) => !p.alive);
     if (allDown) {
       c.state = 'failed';
       this.emit(S2C.CHAMBER, { state: 'failed', floor: c.floor, reason: 'wiped' });
-      // Same cleanup as the time-out above, which is the point: a failed run is over, and
-      // it used to be over only for the clock. A wipe left the whole wave alive in the
-      // arena, so the party respawned at the entry of a dungeon that still had eight
-      // level-40 enemies hunting them — and nothing could reset it but leaving the zone.
+      // A wipe left the whole wave alive in the arena, so the party respawned at the entry of
+      // a dungeon that still had eight level-40 enemies hunting them — and nothing could reset
+      // it but leaving the zone. Same cleanup as the time-out, which is the point: a failed
+      // run is over, and it used to be over only for the clock.
+      this.enemies.clear();
+      this.projectiles.clear();
+      return;
+    }
+    if (elapsed > c.timeLimit) {
+      c.state = 'failed';
+      this.emit(S2C.CHAMBER, { state: 'failed', floor: c.floor, remaining: c.ids.size });
       this.enemies.clear();
       this.projectiles.clear();
     }
