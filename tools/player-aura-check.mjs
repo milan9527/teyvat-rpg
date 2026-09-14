@@ -1221,22 +1221,24 @@ try {
   /**
    * Where the light is, weighted by how much light it is.
    *
-   * Not the diff's bounding box. A player taking a hit floods the **entire viewport** with a flat
-   * wash — 05-before is rgb 2,4,12 and every pixel of the 0.05 s frame sits on 0,26,57, so
-   * `diffMask` returns all 655 360 px and a box of 1024x640 whose centre is the centre of the
+   * Not the diff's bounding box. A player taking a hit used to flood the **entire viewport** with a
+   * flat wash — 05-before was rgb 2,4,12 and every pixel of the 0.05 s frame sat on 0,26,57, so
+   * `diffMask` returned all 655 360 px and a box of 1024x640 whose centre is the centre of the
    * frame. And `__frameBody` centres the camera on the character, so "the effect's centre is
    * 0.05 m from my own projection" was arithmetic about the viewport, true no matter what the
-   * reaction drew or where. (The flood and the hard-edged square flashes it sits inside are their
-   * own defect — `flash()` is an untextured `PlaneGeometry` — and their own unit.)
+   * reaction drew or where. (That flood was its own defect and got its own unit: the hit flash is
+   * now a rim, `uFlashEdge` in `GradeShader`, and the impact quads inside it have a falloff.)
    *
-   * So the threshold comes out of the frame being measured: the flood is uniform, so a corner far
-   * from the player reads its level, and only pixels well above it count as the effect. The mask's
-   * size is printed next to the whole-frame count, which is what makes the flood visible instead of
-   * silently carrying the measurement.
+   * The threshold still comes out of the frame being measured, but the corner it comes from means
+   * something different now: the rim flash *peaks* at the corner, so `flash` below is the most the
+   * hit cue adds anywhere in the frame rather than a level it adds everywhere — which makes the
+   * bar an upper bound, and a conservative one for the middle of the picture where the cue adds
+   * nothing at all. Printing it next to the mask's size is what keeps the cue visible in the
+   * output instead of silently carrying the measurement.
    */
   const lumOf = (im, i) => 0.2126 * im.data[i] + 0.7152 * im.data[i + 1] + 0.0722 * im.data[i + 2];
   const litAt = (img, base) => {
-    const corner = { x: 0, y: 0, w: 96, h: 96, label: 'flood' };
+    const corner = { x: 0, y: 0, w: 96, h: 96, label: 'rim' };
     const flood = rectStats(img, corner).lum - rectStats(base, corner).lum;
     const bar = Math.max(24, flood + 30);
     let sw = 0, sx = 0, sy = 0, n = 0;
@@ -1254,8 +1256,8 @@ try {
   // On the peak frame, which is the one the presence assertion above is about.
   const lit = litAt(shots[0].img, before);
   console.log(`  (measured through the camera at ${view.dist} m: ${view.perM} px/m,`
-    + ` me at ${view.me.x},${view.me.y}; the ${PHASES[0]} s frame floods the whole viewport by`
-    + ` ${lit.flood} luma, so the light is the ${lit.n} px above ${lit.bar})`);
+    + ` me at ${view.me.x},${view.me.y}; the ${PHASES[0]} s frame's hit cue peaks at`
+    + ` ${lit.flood} luma in the corner, so the light is the ${lit.n} px above ${lit.bar})`);
   if (!check('the reaction\'s light is a shape in the frame, not the whole frame',
     lit.n > 200 && lit.n < shots[0].img.width * shots[0].img.height * 0.5,
     `${lit.n} px are more than ${lit.bar} luma brighter than the pre-hit frame`)) {

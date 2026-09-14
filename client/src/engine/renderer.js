@@ -26,6 +26,10 @@ const GradeShader = {
     uTint: { value: new THREE.Color(1, 1, 1) },
     uFlash: { value: 0.0 },
     uFlashColor: { value: new THREE.Color(1, 1, 1) },
+    // 1 = the hit flash is a rim; 0 = the flat full-frame wash it used to be. A measurement
+    // axis, like `uShape` on the impact quad: the probe turns it off to prove the reading it
+    // just took is of the mask and not of the exposure.
+    uFlashEdge: { value: 1.0 },
   },
   vertexShader: /* glsl */`
     varying vec2 vUv;
@@ -33,7 +37,7 @@ const GradeShader = {
   `,
   fragmentShader: /* glsl */`
     uniform sampler2D tDiffuse;
-    uniform float uSaturation, uContrast, uVignette, uAberration, uFlash;
+    uniform float uSaturation, uContrast, uVignette, uAberration, uFlash, uFlashEdge;
     uniform vec3 uLift, uGain, uFlashColor;
     uniform vec3 uTint;
     varying vec2 vUv;
@@ -71,8 +75,24 @@ const GradeShader = {
       c *= uTint;
       // Vignette
       c *= 1.0 - uVignette * smoothstep(0.18, 0.78, r2);
-      // Hit flash
-      c = mix(c, uFlashColor, uFlash);
+      // Hit flash: light from the rim, not a coat of paint over the picture.
+      //
+      // This line used to be mix(c, uFlashColor, uFlash) — a flat mix over every pixel. Measured
+      // with uFlash pinned at 0.3 (.run/flood-lab.mjs, world visible, noon): one hit changed
+      // 100 % of the viewport, 655360 px of 655360, and the middle of the frame moved as much as
+      // the corner — 109,138,68 -> 146,134,172 in the centre against 111,125,92 -> 147,123,176 in
+      // the corner. The character and the creature being fought are in that middle. Mixing *toward*
+      // a saturated hue also throws the picture away rather than adding to it: a 水 hit left 953 px
+      // of red at exactly 0.
+      //
+      // So the cue lives in the periphery — where the vignette already is, and where a real eye
+      // notices motion it is not looking at — and it arrives as light, added on top, so every
+      // surface underneath keeps its own colour. Grows with r2 as well as being masked by it, so
+      // the corners carry the strongest of it — and the 0.42/1.35 pair is chosen so the whole
+      // frame gains about as much light as the flood spent, redistributed rather than added to.
+      vec3 flood = mix(c, uFlashColor, uFlash);
+      vec3 rim = c + uFlashColor * uFlash * smoothstep(0.035, 0.26, r2) * (0.42 + 1.35 * r2);
+      c = mix(flood, rim, uFlashEdge);
       gl_FragColor = vec4(max(c, 0.0), 1.0);
     }
   `,
@@ -198,7 +218,13 @@ export class Renderer {
     this.width = w; this.height = h;
   }
 
-  /** Trigger a full-screen colour flash (elemental burst, taking a big hit). */
+  /**
+   * Trigger a hit flash in `color` — a rim of light in the periphery, see `GradeShader`.
+   *
+   * The strength decays in `render`, not in the game's `update`, so a *stopped* page keeps
+   * whatever was left of it and photographs a tinted frame. Anything that freezes the game to
+   * measure pixels has to zero `_flash` **and** `uFlash` (react-check's `__canon` does).
+   */
   flash(color = 0xffffff, strength = 0.35) {
     this.grade.uniforms.uFlashColor.value.setHex(color);
     this._flash = strength;

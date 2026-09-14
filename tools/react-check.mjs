@@ -290,11 +290,24 @@ const INSTALL = `(() => {
   // ring, where the tone curve amplifies a small linear delta. It is not the product's
   // problem — a live game never draws the same frame twice — but it is this file's, because
   // every claim here is a pixel count and two of them demand exact equality.
+  // ...and the one transient that lives in the *renderer* rather than in the sim or a pool.
+  // \`Renderer._flash\` is raised by every unblocked hit on the local player (game.js:1673) and
+  // decays inside \`render(dt)\`, not inside \`update(dt)\` — so a page frozen a moment after the
+  // probe's own character took a hit photographs a **coloured plate** and then decays it, by
+  // 0.0416 per render, while the captures are being taken. That is how section 4's pre-hit frame
+  // came back at luma 14.5, rgb 43,6,16 in one run and 4.1, rgb 2,4,12 in the next, and why the
+  // 1.2 s frame differed from its own control by the whole viewport in the first. Zeroed here
+  // and *reported*, because "the plate was black" is a claim the caller has to be able to assert.
   window.__canon = () => {
     g.vfx.clear();
     g.overlay.clear?.();
     g.vfx.sparks.cursor = 0;
     for (const pool of g.vfx.meshPools()) pool.free.sort((a, b) => a.id - b.id);
+    const u = g.r.grade.uniforms;
+    const was = { flash: +(g.r._flash || 0).toFixed(4), uFlash: +u.uFlash.value.toFixed(4) };
+    g.r._flash = 0;
+    u.uFlash.value = 0;
+    return { was, now: u.uFlash.value, edge: u.uFlashEdge ? u.uFlashEdge.value : null };
   };
   return true;
 })()`;
@@ -929,10 +942,10 @@ try {
         const raw = { at: ndc(d.x, d.y, d.z), me: ndc(g.me.x, g.me.y + 1.0, g.me.z) };
         g.socket.close();
         const iso = window.__isolate();
-        window.__canon();
+        const canon = window.__canon();
         window.__cues = [];
         window.__react = [];
-        window.__caught = { d, iso, at, me, raw, wire: window.__wire.length };
+        window.__caught = { d, iso, canon, at, me, raw, wire: window.__wire.length };
         // The product's own handler, with the server's own payload. `strip` is the control:
         // the same payload with the reaction key taken off, which is what the plain hit in the
         // very same fight would have drawn.
@@ -1901,6 +1914,68 @@ try {
   }
   check('...and the pre-hit frame is that black plate, not the meadow behind it',
     plate.lum < 20, `luma ${plate.lum}, rgb ${plate.rgb.join(',')}`);
+  // Why the plate can be trusted to be black: the renderer's own hit flash was zeroed when the
+  // page froze, and `__canon` said what it found. A run that caught the freeze 0.1 s after the
+  // ruin guard connected shot its control frame at luma 14.5 instead of 4.1 and then failed
+  // "it is over by 1.2 s" against it, because `uFlash` was still decaying — inside `render`,
+  // which is the one clock a stopped game keeps running.
+  check('...and the renderer\'s hit flash was zeroed when the page froze',
+    got.canon && got.canon.now === 0,
+    `found ${JSON.stringify(got.canon?.was)}, now uFlash ${got.canon?.now}, uFlashEdge ${got.canon?.edge}`);
+
+  /*
+   * And the flash itself, on the plate it would otherwise have ruined: a hit is a *rim* of light.
+   *
+   * `GradeShader` used to end with `mix(c, uFlashColor, uFlash)`, which repaints every pixel by
+   * the same amount — measured on a real frame with `uFlash` held at 0.3, one hit moved 100 % of
+   * the viewport and the centre changed as much as the corner (109,138,68 -> 146,134,172 against
+   * 111,125,92 -> 147,123,176). The creature being fought is in that centre. So both halves are
+   * asserted here, and `uFlashEdge 0` restores the flood to prove the reading is of the mask:
+   * with the mask on, the corner lights and the middle of the frame does not move at all.
+   */
+  const grade = (f, edge) => p.evaluate(([v, e]) => {
+    const u = window.game.r.grade.uniforms;
+    u.uFlashColor.value.setHex(0x3aa7ff);
+    u.uFlash.value = v;
+    if (e != null && u.uFlashEdge) u.uFlashEdge.value = e;
+    for (let i = 0; i < 3; i++) window.game.r.render(0);
+    return { uFlash: u.uFlash.value, edge: u.uFlashEdge ? u.uFlashEdge.value : null };
+  }, [f, edge]);
+  const R = (v) => Math.round(v);
+  const CENTRE = { x: R(before.width * 0.35), y: R(before.height * 0.35),
+    w: R(before.width * 0.3), h: R(before.height * 0.3), label: 'centre' };
+  const CORNER = { x: 0, y: 0, w: R(before.width * 0.08), h: R(before.height * 0.12), label: 'corner' };
+  const lumIn = (img, r) => rectStats(img, r).lum;
+  const plateLum = { c: lumIn(before, CENTRE), k: lumIn(before, CORNER) };
+  // The same wait the plate itself needed: three renders put the frame in the drawing buffer, and
+  // the compositor still has to paint it before `screenshot` can see it. Without this the readings
+  // below are of the *previous* uniform value — a stale frame is a silent zero.
+  const settled = async (tag) => {
+    await p.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+    await sleep(400);
+    return capture(tag);
+  };
+  const setRim = await grade(0.3, 1);
+  const rimImg = await settled('00b-flash-rim');
+  const rimAt = { c: lumIn(rimImg, CENTRE), k: lumIn(rimImg, CORNER) };
+  await grade(0.3, 0);
+  const floodImg = await settled('00c-flash-flood');
+  const floodAt = { c: lumIn(floodImg, CENTRE), k: lumIn(floodImg, CORNER) };
+  await grade(0, 1);
+  const restored = await settled('00d-restored');
+  console.log(`  flash: plate ${plateLum.c.toFixed(1)}/${plateLum.k.toFixed(1)}`
+    + `  rim ${rimAt.c.toFixed(1)}/${rimAt.k.toFixed(1)}`
+    + `  flood ${floodAt.c.toFixed(1)}/${floodAt.k.toFixed(1)} (centre/corner luma)`);
+  check('taking a hit lights the rim of the frame', rimAt.k - plateLum.k > 10,
+    `corner +${(rimAt.k - plateLum.k).toFixed(1)} luma at uFlash 0.3, ${JSON.stringify(setRim)}`);
+  check('...and leaves the middle of the picture, where the fight is, alone',
+    Math.abs(rimAt.c - plateLum.c) < 1.5, `centre ${plateLum.c.toFixed(2)} -> ${rimAt.c.toFixed(2)} luma`);
+  check('...and turning the mask off floods the whole frame again',
+    floodAt.c - plateLum.c > 10, `centre +${(floodAt.c - plateLum.c).toFixed(1)} luma at uFlashEdge 0`
+      + ` (against +${(rimAt.c - plateLum.c).toFixed(1)} with the mask on)`);
+  check('...and the flash is back at zero, so the frames below still have their control',
+    pixelsDiffering(restored, before, 8) === 0,
+    `${pixelsDiffering(restored, before, 8)} px differ from the pre-hit plate`);
   await p.evaluate(() => window.__fire(false));
   const shots = [];
   let at = 0;
