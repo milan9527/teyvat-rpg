@@ -86,6 +86,7 @@ uniform vec3  uSnowColor;
 uniform float uBands;
 uniform vec3  uShadowTint;
 uniform float uDetail;
+uniform float uNoiseStretch;
 uniform float uArenaR;        // indoor arena radius, 0 outdoors
 uniform vec3  uInlayColor;    // colour of the floor inlay in an indoor arena
 uniform float uInlayMix;      // how hard that colour is mixed in (per zone)
@@ -116,6 +117,27 @@ float fbm(vec2 p) {
   float s = 0.0, a = 0.5;
   for (int i = 0; i < 4; i++) { s += a * vnoise(p); p *= 2.03; a *= 0.5; }
   return s;
+}
+// The same field, stretched across the range it actually occupies.
+//
+// Four halving octaves of a 0..1 noise sum to something that never visits its own ends:
+// measured over 160k samples of this exact function, mean 0.467, std 0.125, p1..p99 =
+// 0.20..0.74, max 0.847. So every term below that *shapes* it with a smoothstep spends most of
+// its authored strength on ground that never reaches the threshold — smoothstep(0.52, 0.88)
+// saturates on 0.05 % of the area and delivers 6 % of the tint it asks for, and the bare-earth
+// patch reached earth colour on 1.0 %. Measured consequence, with the tuft carpet hidden so the
+// terrain shader is answering alone (.run/ground-detail-lab.mjs): ground contrast std/mean of
+// 2.3 % at 8 m and 3.5 % at 35 m, i.e. +-3 counts on a 115-luma meadow at every distance. The
+// snow drift and the sastrugi further down already name this trap and correct it by stretching;
+// the meadow's own terms never were.
+//
+// Stretched about the mean rather than rescaled from zero, so the field's *average* is unchanged
+// and only its spread grows: these terms redistribute light rather than adding it, the same
+// budget discipline as the rim flash in the grade pass. uNoiseStretch 0 hands back the raw fbm
+// exactly, which is the measurement axis.
+float fbmS(vec2 p) {
+  float v = fbm(p);
+  return mix(v, clamp(0.5 + (v - 0.467) * 1.85, 0.0, 1.0), uNoiseStretch);
 }
 
 void main() {
@@ -161,8 +183,16 @@ void main() {
   // invisible: fbm only clears 0.88 over a few percent of its area, so the patches were
   // both rare and never more than a light tint. Earth wants to actually reach earth colour
   // somewhere, over a decent fraction of the ground, or it is just another wash.
-  float bare = fbm(vWorld.xz * 0.021 + 47.3);
-  base = mix(base, uColD, smoothstep(0.48, 0.80, bare) * 0.62 * w.x);
+  //
+  // Widening the window was the right instinct and it did not go nearly far enough, because the
+  // ceiling was still being compared against a field that only reaches 0.85: (0.48, 0.80) on the
+  // raw fbm saturates on 1.04 % of the ground. On the stretched field the *same* window would
+  // put full dirt on 16.7 % of a Mondstadt meadow, which is a different picture and not a more
+  // realistic one, so the window moves with the field: (0.56, 0.94) reaches earth on 5.8 % and
+  // carries a mean weight of 16.6 % against the old 12.1 % — barely more dirt on average, but
+  // it is now somewhere in particular instead of a thin film everywhere.
+  float bare = fbmS(vWorld.xz * 0.021 + 47.3);
+  base = mix(base, uColD, smoothstep(0.56, 0.94, bare) * 0.62 * w.x);
 
   // ---- clump variation, at the scale of a patch of grass (2-3 m) -----------
   // Without a term at this frequency the ground is smooth between the 13 m meso
@@ -170,7 +200,12 @@ void main() {
   // however many tufts get scattered on top. Bleached crowns and damp hollows pull
   // the hue in opposite directions, which is what keeps this from looking like
   // someone turning a brightness knob up and down.
-  float clump = fbm(vWorld.xz * 0.42);
+  // One variable, three consumers, one field: splitting it into a raw copy for the brightness
+  // term and a stretched copy for the two tints would be two different patches of grass claiming
+  // to be the same patch. The linear use keeps its mean (0.90 + 0.5 * 0.22 either way) and gains
+  // spread, which is the whole point at 2.4 m — this is the one frequency band that is still
+  // several pixels wide at 40 m, where the tuft carpet has been gone for 15 m.
+  float clump = fbmS(vWorld.xz * 0.42);
   base *= 0.90 + clump * 0.22;
   base = mix(base, base * vec3(1.11, 1.05, 0.80), smoothstep(0.52, 0.88, clump) * 0.45 * uDetail);
   base = mix(base, base * vec3(0.72, 0.92, 0.84), smoothstep(0.48, 0.12, clump) * 0.42 * uDetail);
@@ -209,7 +244,7 @@ void main() {
     // missing: below the 2-3 m clumps and above the blade-wide streaks. Standing
     // still, this is the difference between turf and a smooth green gradient, and it
     // is only paid for inside the 20 m near-field window.
-    float mottle = fbm(vWorld.xz * 0.95);
+    float mottle = fbmS(vWorld.xz * 0.95);
     base *= 1.0 + (mottle - 0.5) * 0.17 * nearW;
     base = mix(base, base * vec3(0.86, 0.95, 0.88), smoothstep(0.58, 0.22, mottle) * 0.24 * nearW);
   }
@@ -641,6 +676,10 @@ export class Terrain {
       uBands: { value: 3.0 },
       uShadowTint: { value: new THREE.Color(t.shadowTint ?? 0x6f7ba8) },
       uDetail: { value: 1.0 },
+      // 1 = the threshold-shaped ground terms read the noise stretched across its own range;
+      // 0 = the raw fbm they used to read, bit-identically. See `fbmS` in the fragment shader —
+      // this is a measurement axis, like `uFlashEdge` on the grade pass.
+      uNoiseStretch: { value: 1.0 },
       // Only indoor arenas get a built floor; outdoors this stays 0 and the whole
       // inlay branch is skipped.
       uArenaR: { value: zone.indoor && t.arena ? t.arena.radius : 0 },
