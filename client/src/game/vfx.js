@@ -351,6 +351,65 @@ const decalMaterial = () => new THREE.ShaderMaterial({
     }`,
 });
 
+/**
+ * The impact flash's shape, in its own fragment shader.
+ *
+ * `PlaneGeometry` + `MeshBasicMaterial` draws a **rectangle of one flat colour**, and this pool is
+ * the one effect in the file whose shape was supposed to come from a texture the project does not
+ * have. Photographed on a black plate (`.run/flash-lab.mjs`): the 6 m shield flash was a 278×278 px
+ * block, `fill 1.000`, corners exactly as bright as the middle (`diag/centre 1.000`) and a radial
+ * profile of `1 1 1 1 1` out to the last pixel — a white sticker, 12 % of the viewport, on every
+ * hit, reaction and burst. `SparkField` already says why that is wrong, twelve lines up: "a square
+ * point reads as a bug".
+ *
+ * So the falloff is computed rather than sampled, from `vUv`, and it is three terms because a flash
+ * is not a disc either: a hot core, a radial tail, and four soft spikes along the quad's own axes
+ * (which are the camera's, after `flash()` billboards it) so a hit reads as a glint.
+ *
+ * `uShape` is the axis this was measured along — 1 is the authored value, 0 puts the flat square
+ * back. `tools/react-check.mjs` sweeps it, because "it has no corners now" is only evidence if the
+ * corners come back when the term is taken away.
+ */
+const flashMaterial = () => new THREE.ShaderMaterial({
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  side: THREE.DoubleSide,
+  fog: false,
+  uniforms: {
+    uColor: { value: new THREE.Color(0xffffff) },
+    uAlpha: { value: 1 },
+    uShape: { value: 1 },
+  },
+  vertexShader: /* glsl */`
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }`,
+  fragmentShader: /* glsl */`
+    uniform vec3 uColor;
+    uniform float uAlpha;
+    uniform float uShape;
+    varying vec2 vUv;
+    void main() {
+      vec2 q = (vUv - 0.5) * 2.0;            // -1..1 across the quad
+      float f = max(0.0, 1.0 - length(q));   // 1 at the centre, 0 at the inscribed circle
+      // Four arms: thin across, long along, on both axes. The max() keeps the crossing point at
+      // one arm's brightness instead of two.
+      vec2 a = abs(q);
+      float arm = max(
+        (1.0 - smoothstep(0.0, 0.17, a.y)) * (1.0 - smoothstep(0.12, 0.98, a.x)),
+        (1.0 - smoothstep(0.0, 0.17, a.x)) * (1.0 - smoothstep(0.12, 0.98, a.y)));
+      float shaped = pow(f, 2.4) * 0.42 + pow(f, 9.0) * 0.5 + arm * 0.36;
+      // Normalised on the centre so that turning the shape off is a change of *shape* and not a
+      // change of exposure: both ends of uShape put the same amount of light at the middle.
+      float m = mix(1.0, shaped / 1.28, uShape);
+      if (m < 0.004) discard;
+      gl_FragColor = vec4(uColor, clamp(m, 0.0, 1.0) * uAlpha);
+    }`,
+});
+
 const additive = (color) => new THREE.MeshBasicMaterial({
   color,
   transparent: true,
@@ -393,10 +452,10 @@ export class Vfx {
       return m;
     }, 12);
 
-    // Impact flash: a billboarded quad, oriented to camera each frame by the
-    // caller-supplied anim through `lookTarget`.
+    // Impact flash: a billboarded quad whose shape lives in `flashMaterial`'s fragment shader —
+    // the geometry is only the canvas the falloff is drawn on.
     this.flashes = new MeshPool(scene, () => {
-      const m = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), additive(0xffffff));
+      const m = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), flashMaterial());
       m.renderOrder = 13;
       return m;
     }, 16);
@@ -571,15 +630,20 @@ export class Vfx {
     });
   }
 
-  /** Camera-facing flash quad. */
+  /**
+   * Camera-facing flash quad.
+   *
+   * `size` is the width the *quad* grows to, and the shape inside it reaches the inscribed circle,
+   * so the visible flash is that circle plus its spikes rather than the full square.
+   */
   flash(x, y, z, color, size, life = 0.16) {
     this.flashes.take(life, (o, u) => {
       o.position.set(x, y, z);
       if (this.camera) o.quaternion.copy(this.camera.quaternion);
       const s = size * (0.4 + u * 1.5);
       o.scale.set(s, s, 1);
-      o.material.color.set(color);
-      o.material.opacity = Math.pow(1 - u, 2) * 0.9;
+      o.material.uniforms.uColor.value.set(color);
+      o.material.uniforms.uAlpha.value = Math.pow(1 - u, 2) * 0.9;
     });
   }
 

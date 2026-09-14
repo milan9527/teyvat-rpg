@@ -560,6 +560,154 @@ try {
         : `${wheres.length} captures at ${wheres[0].where}`);
   }
 
+  /* ---------------------------------------------------------------------------- */
+  /* 3b. The shape of the impact flash                                            */
+  /* ---------------------------------------------------------------------------- */
+
+  /**
+   * Everything above counts pixels a reaction *changed*, which cannot see the shape of the
+   * thing that changed them. `this.flashes` was `PlaneGeometry` + `MeshBasicMaterial`: a
+   * rectangle of one flat colour, no map, no falloff, scaled up to 6 m by `shield()` — so every
+   * hit, reaction and burst in the game put a hard-edged white block on the screen (measured on
+   * a black plate: 278×278 px, `fill 1.000`, corners exactly as bright as the middle, radial
+   * profile `1 1 1 1 1`). Eleven green reactions above photographed it eleven times and none of
+   * them could say so, because a sticker changes as many pixels as a flash does.
+   *
+   * So the claim here is about *distribution* rather than count, on one flash fired directly:
+   * no corners, a falloff, and spikes along the quad's own axes. All four are then mutated by
+   * `uShape`, the term the fix added — with it at 0 the square has to come back, or these
+   * thresholds are describing something else in the frame. The centre stays as bright either
+   * way, which is what makes it a change of shape and not a change of exposure.
+   */
+  console.log('\n--- 3b. the impact flash is light, not a sticker');
+  {
+    const lumAt = (im, x, y) => {
+      if (x < 0 || y < 0 || x >= im.width || y >= im.height) return 0;
+      const i = ((y | 0) * im.width + (x | 0)) * 4;
+      return 0.2126 * im.data[i] + 0.7152 * im.data[i + 1] + 0.0722 * im.data[i + 2];
+    };
+    // A patch rather than a pixel: at `high` the bloom pass is on, and one sample on a bloomed
+    // additive surface is a lottery on the blur kernel's phase.
+    const patch = (im, x, y, r = 2) => {
+      let s = 0, n = 0;
+      for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) { s += lumAt(im, x + dx, y + dy); n++; }
+      return s / n;
+    };
+    /** Fire one flash, hold it at a fixed age, and photograph it. `shape` is the mutation axis. */
+    const flashShot = async (tag, size, shape) => {
+      const st = await p.evaluate(({ size, shape }) => {
+        const g = window.game;
+        window.__canon();
+        window.__seed(4242);
+        // Every mesh in the pool, not just the one `take()` happens to pop: which mesh a flash
+        // lands in depends on the whole history of captures (see `__canon`).
+        const meshes = [...g.vfx.flashes.free, ...g.vfx.flashes.live.map((e) => e.o)];
+        let mats = 0, was = null;
+        for (const o of meshes) {
+          const u = o.material?.uniforms?.uShape;
+          if (!u) continue;
+          if (was === null) was = u.value;
+          u.value = shape; mats++;
+        }
+        const at = { x: g.me.x, y: g.me.y + 1.2, z: g.me.z };
+        // `flash()` billboards against `this.camera`, which only `update()` hands it.
+        g.vfx.update(0, g.camera);
+        g.vfx.flash(at.x, at.y, at.z, 0xffffff, size, 0.3);
+        for (let i = 0; i < 2; i++) g.vfx.update(1 / 60, g.camera);
+        for (let i = 0; i < 3; i++) g.r.render(0.016);
+        const el = g.r.renderer.domElement;
+        const V = (x, y, z) => {
+          const v = new g.scene.position.constructor(x, y, z);
+          v.project(g.camera);
+          return { x: (v.x * 0.5 + 0.5) * el.clientWidth, y: (-v.y * 0.5 + 0.5) * el.clientHeight };
+        };
+        const c = V(at.x, at.y, at.z), up = V(at.x, at.y + 1, at.z);
+        const live = g.vfx.flashes.live[0] || null;
+        return { mats, was, pool: meshes.length, c, perM: +Math.abs(up.y - c.y).toFixed(1),
+          live: g.vfx.flashes.live.length, u: live ? +(live.t / live.life).toFixed(3) : null,
+          scale: live ? +live.o.scale.x.toFixed(2) : null };
+      }, { size, shape });
+      await sleep(500);
+      const file = `${outDir}/flash-${tag}.png`;
+      await p.screenshot({ path: file });
+      const img = decodePng(fs.readFileSync(file));
+      // The bounding box of everything above the black plate, and the shape inside it.
+      let x0 = 1e9, x1 = -1, y0 = 1e9, y1 = -1, lit = 0;
+      for (let y = 0; y < img.height; y++) {
+        for (let x = 0; x < img.width; x++) {
+          if (lumAt(img, x, y) <= 8) continue;
+          lit++;
+          if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+        }
+      }
+      const bw = x1 - x0 + 1, bh = y1 - y0 + 1;
+      const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2, r = bw / 2;
+      const centre = patch(img, cx, cy);
+      // 0.7r along both diagonals: inside a square (bright), all but outside the inscribed
+      // circle (0.99r, dark). This one number is the whole difference between the two shapes.
+      const diag = [[0.7, 0.7], [-0.7, 0.7], [0.7, -0.7], [-0.7, -0.7]]
+        .map(([a, c]) => patch(img, cx + a * r, cy + c * r));
+      // Two profiles at the same radii: one down an arm (the +x axis), one down the diagonal,
+      // where no arm runs. Normalised on the centre so both shapes are read the same way.
+      const arm = [0.25, 0.5, 0.75, 0.99].map((f) => +(patch(img, cx + f * r, cy) / centre).toFixed(3));
+      const dia = [0.25, 0.5, 0.75].map((f) =>
+        +(patch(img, cx + f * r * 0.707, cy + f * r * 0.707) / centre).toFixed(3));
+      const m = { ...st, bw, bh, lit, x0, y0, x1, y1, w: img.width, h: img.height,
+        fill: +(lit / (bw * bh)).toFixed(3), centre: +centre.toFixed(1),
+        diag: +(diag.reduce((a, v) => a + v, 0) / 4 / centre).toFixed(3), arm, dia, file };
+      console.log(`  (${tag}: ${size} m at u ${st.u}, scale ${st.scale}, bbox ${bw}x${bh},`
+        + ` lit ${lit} px, fill ${m.fill}, centre ${m.centre}, diag/centre ${m.diag},`
+        + ` arm ${arm.join(' ')}, diagonal ${dia.join(' ')})`);
+      return m;
+    };
+
+    // 2.2 m is the elemental-burst flash (`burst()`); the shield's 6 m one is the same picture at
+    // a bigger scale (`fill` and `diag/centre` read the same at 0.9, 2.2 and 6 m in the lab), and
+    // 6 m at this camera's 135 px/m is 810 px wide — clipped by the viewport, which would make
+    // every ratio below a measurement of the frame's edges.
+    const shaped = await flashShot('shaped', 2.2, 1);
+    check('every mesh in the flash pool carries the shape term, authored at 1',
+      shaped.mats === shaped.pool && shaped.pool >= 16 && shaped.was === 1,
+      `${shaped.mats}/${shaped.pool} materials, uShape was ${shaped.was}`);
+    check('the flash is one flash, held at a fixed age', shaped.live === 1 && shaped.u > 0 && shaped.u < 0.2,
+      `${shaped.live} live at u ${shaped.u}, ${shaped.perM} px/m`);
+    // Whole and un-clipped, or `fill`, the corner samples and both profiles are all reading a
+    // shape the viewport cut for them.
+    check('...and the whole of it is inside the frame',
+      shaped.x0 > 4 && shaped.y0 > 4 && shaped.x1 < shaped.w - 5 && shaped.y1 < shaped.h - 5,
+      `${shaped.bw}x${shaped.bh} at ${shaped.x0},${shaped.y0} in ${shaped.w}x${shaped.h}`);
+    check('the impact flash has no corners', shaped.diag < 0.35,
+      `0.7r along the diagonals is ${(shaped.diag * 100).toFixed(1)} % of the centre`);
+    check('...and it falls off rather than ending at an edge',
+      shaped.arm[0] < 0.95 && shaped.arm[0] > shaped.arm[1] && shaped.arm[1] > shaped.arm[2]
+        && shaped.arm[2] > shaped.arm[3] && shaped.arm[3] < 0.2,
+      `centre → edge: 1 ${shaped.arm.join(' ')}`);
+    check('...and it has spikes along its own axes, so a hit reads as a glint',
+      shaped.arm[1] > shaped.dia[1] * 1.7,
+      `at half the radius: ${shaped.arm[1]} down an arm vs ${shaped.dia[1]} down the diagonal`);
+
+    // The mutation. Without it, every bar above could be describing a flash that is simply
+    // smaller, or dimmer, or absent — the square is what those numbers are a claim *against*.
+    const flat = await flashShot('flat', 2.2, 0);
+    check('taking the shape term away brings the flat square back',
+      flat.fill > 0.98 && flat.diag > 0.9 && flat.arm[2] > 0.9,
+      `fill ${flat.fill} (shaped ${shaped.fill}), diag/centre ${flat.diag}, 0.75r ${flat.arm[2]}`);
+    check('...and it is the shape that changed, not the exposure',
+      Math.abs(shaped.centre - flat.centre) / flat.centre < 0.12 && shaped.lit < flat.lit * 0.8,
+      `centre ${shaped.centre} vs ${flat.centre}, lit ${shaped.lit} vs ${flat.lit} px`);
+    // Put the product's own value back: section 4 photographs real flashes.
+    const back = await p.evaluate(() => {
+      let n = 0;
+      for (const o of [...window.game.vfx.flashes.free, ...window.game.vfx.flashes.live.map((e) => e.o)]) {
+        const u = o.material?.uniforms?.uShape;
+        if (u) { u.value = 1; n++; }
+      }
+      return n;
+    });
+    check('the shape term is back at its authored value for the fight below', back === shaped.pool,
+      `${back} materials at uShape 1`);
+  }
+
   /* ------------------------------------------------------------------------------ */
   /* 4. End to end: the reaction the *sim* computed, over the whole life of the       */
   /*    effect it caused                                                             */
