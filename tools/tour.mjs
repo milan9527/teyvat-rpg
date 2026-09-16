@@ -86,8 +86,10 @@ const GROUND_MIN = 6.0, GROUND_MAX = 34.0;
 // carpet on a frozen Mondstadt frame (.run/ground-detail-lab.mjs) showed what the ground has
 // without it: contrast (window std over window mean) of 2.3 % at 8 m and 3.5 % at 35 m, i.e. the
 // terrain shader was leaving the meadow flat at *every* distance and the near field only looked
-// right because 8.8 tufts/m2 were standing on it. Those tufts stop: `STREAM.grass` keeps a 3x3
-// block of 24 m cells, measured 8.8/m2 out to 20 m, then 5.7, 3.4, 1.3, 0.3 and zero past 55 m.
+// right because 8.8 tufts/m2 were standing on it. Those tufts stop: `STREAM.grass` keeps every
+// 24 m cell within `reach` (32 m) of the player, measured 8.8/m2 out to 20 m, then thinning to
+// zero — and it used to keep a 3x3 block on a 32 m trigger, which left as little as 9 m of carpet
+// ahead of a walking player (.run/grass-stream-lab.mjs), i.e. this band uncovered.
 // So the band below is the one where nothing was answering, and these are the assertions that
 // keep it answered.
 const MID = { lo: 25, hi: 40 };

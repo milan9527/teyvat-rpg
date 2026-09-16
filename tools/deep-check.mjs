@@ -434,6 +434,9 @@ async function playFloor(floor, opts = {}) {
   const staggers = [];             // { at, ph } while the boss is stunned
   let boss = null;
   let bossShieldMax = 0;
+  // Also the *minimum*, because "it was broken" and "no shield stands now" are two claims and
+  // only the first one is about the arriving shield — see the assertion.
+  let bossShieldMin = Infinity;
   let held = 0;
   const done = () => ca.got(S2C.CHAMBER).slice(nA).find((m) => m.state === 'cleared' || m.state === 'failed');
 
@@ -451,6 +454,7 @@ async function playFloor(floor, opts = {}) {
         if (!ENEMIES[e.t]?.boss) continue;
         boss = e;
         bossShieldMax = Math.max(bossShieldMax, e.shm || 0);
+        bossShieldMin = Math.min(bossShieldMin, e.sh ?? 0);
         if (!phases.has(e.ph)) {
           phases.set(e.ph, { frac: e.hp / e.mhp, at: +elapsed.toFixed(1), st: e.st, lv: e.lv, mhp: e.mhp });
         }
@@ -475,7 +479,8 @@ async function playFloor(floor, opts = {}) {
     ((await rest(b.token, '/api/player/state')).b.player || {}).worldLevel || 0,
   );
   return {
-    def, start, end, rwA, rwB, firstWave, phases, staggers, boss, bossShieldMax, brokeShield,
+    def, start, end, rwA, rwB, firstWave, phases, staggers, boss, bossShieldMax, bossShieldMin,
+    brokeShield,
     held, wl: [wlBefore, wlAfter], wall: (Date.now() - t0) / 1000,
   };
 }
@@ -647,9 +652,30 @@ for (const def of zdef.chambers.filter((c) => c.floor >= Math.max(2, FIRST) && c
     }
     if (bdef.shield) {
       const expect = enemyStatAtLevel(bdef.shield.hp, r.boss.lv);
+      // A shield standing at the end is not a shield that was never broken. The herald's own
+      // `shieldSurge` carries `selfShield`, so it puts a fresh one up mid-fight and whichever
+      // side of that the last snapshot lands on is decided by AI timing: this assertion read
+      // `left=1800` on a floor it had cleared, with `broke=true` beside it. So the claim is
+      // stated in three parts — the arriving shield is the authored size, it reached zero, and
+      // anything standing afterwards is small enough to be a re-shield rather than the original.
+      // The allowance is derived from the boss's own moves, not from the number 1800.
+      const surge = Math.max(0, ...(bdef.attacks || []).map((k) => ATTACK_MOVES[k]?.selfShield || 0));
       ok(`floor ${floor}: the ${bdef.shield.element} shield arrives at its authored size and is broken`,
-        r.bossShieldMax === expect && r.brokeShield && r.boss.sh === 0,
-        `${r.bossShieldMax} vs ${expect}, broke=${r.brokeShield}, left=${r.boss.sh}`);
+        // `brokeShield` is read off the DAMAGE stream, so it cannot be missed between two 180 ms
+        // snapshots the way a `sh === 0` sample can — `bossShieldMin` is printed as context, not
+        // gated. With no `selfShield` move on the boss the bound below is the strict `sh === 0`.
+        r.bossShieldMax === expect && r.brokeShield && r.boss.sh <= surge,
+        `${r.bossShieldMax} vs ${expect}, broke=${r.brokeShield}, low=${r.bossShieldMin},`
+        + ` left=${r.boss.sh} of a ${surge} re-shield`);
+      // Not gated, printed: `selfShield` is a flat authored number in a game where the shield it
+      // refreshes is `enemyStatAtLevel(hp, lv)`. At level 85 that is 1800 against 132369 — the
+      // move's whole documented effect ("refreshes its own shield") is 1.4 % of one, so the
+      // authored 56 % intent (1800/3200) never survives the level curve.
+      if (surge) {
+        console.log(`     floor ${floor}: shieldSurge refreshes ${surge} of ${expect}`
+          + ` (${(surge / expect * 100).toFixed(1)}% at lv ${r.boss.lv};`
+          + ` authored ${(surge / bdef.shield.hp * 100).toFixed(0)}% of the shield at lv 1)`);
+      }
     }
   } else {
     ok(`floor ${floor}: no boss where none is authored`, !r.boss, `${r.boss?.t || ''}`);

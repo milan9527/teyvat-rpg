@@ -281,6 +281,12 @@ const SPEC = [
   // No screenshots and no tier: it marches rigs and reads bone matrices, so it is the one
   // motion probe that cannot be fooled by a stale frame.
   { name: 'gait-check', group: 'browser', needs: 'browser', timeout: 10 * MIN },
+  // The only probe that photographs nothing and *walks*. Every art probe above grades a
+  // standstill, which is the one state in which scatter streaming cannot be wrong; this one
+  // drives `world.update` along two headings and measures how much ground is in front of the
+  // player at every step. It found the tuft carpet ending 9 m from her feet and tripling in one
+  // step, because residency kept a 3x3 block of 24 m cells on a 32 m trigger.
+  { name: 'stream-check', group: 'browser', needs: 'browser', timeout: 25 * MIN },
 ];
 
 // A group name that is not in the default set is a probe that never runs: the row is written,

@@ -119,6 +119,7 @@ const state = () => p.evaluate((poiId) => {
     done: !!e?.done,
     progress: g.world.puzzleProgress(poiId),
     notes: window.__notes || [],
+    noteCalls: window.__noteCalls || [],
     toasts: window.__toasts || [],
     frames: g._frames ?? null,
   };
@@ -244,6 +245,24 @@ try {
     window.__notes = [];
     window.__toasts = [];
     window.game.on('toast', (t) => window.__toasts.push(t.text));
+    // `overlay.note` draws nothing when its anchor does not project, and an empty `__notes` alone
+    // cannot tell "the product never said it" from "it said it at a point off the screen". So
+    // record every call *and* what the projection made of it: text, the screen point or null, and
+    // where the camera and the player were standing when it was asked.
+    const ov = window.game.overlay;
+    const orig = ov.note.bind(ov);
+    window.__noteCalls = [];
+    ov.note = (x, y, z, text, cls) => {
+      const g = window.game, cam = g.camera.position;
+      window.__noteCalls.push({
+        text, at: [+x.toFixed(1), +y.toFixed(1), +z.toFixed(1)],
+        pt: ov.project(x, y, z, 90),
+        cam: [+cam.x.toFixed(1), +cam.y.toFixed(1), +cam.z.toFixed(1)],
+        me: [+g.me.x.toFixed(1), +g.me.y.toFixed(1), +g.me.z.toFixed(1)],
+        dist: +Math.hypot(x - cam.x, y - cam.y, z - cam.z).toFixed(1),
+      });
+      return orig(x, y, z, text, cls);
+    };
     new MutationObserver((recs) => {
       for (const r of recs) {
         for (const nd of r.addedNodes) {
@@ -422,10 +441,16 @@ try {
     lit1 && Math.hypot(afterClick.me.x - far.me.x, afterClick.me.z - far.me.z) > 1.5,
     `lit ${afterClick.progress.lit}/${afterClick.progress.total}, walked `
     + `${Math.hypot(afterClick.me.x - far.me.x, afterClick.me.z - far.me.z).toFixed(1)} m`);
-  check('and it says how many are left, at the monument and in a toast',
-    afterClick.notes.includes(`1/${nodes.length}`)
-    && afterClick.toasts.some((t) => t === `已点亮 1/${nodes.length}`),
-    `notes ${JSON.stringify(afterClick.notes)} toasts ${JSON.stringify(afterClick.toasts)}`);
+  // Announced in the channel that does not depend on where the camera is pointing. The note at
+  // the monument is the other half of this claim and is asserted below, from the F key, because
+  // *this* path cannot promise a camera: the walk is 4.6 m up a slope (the ring's monuments stand
+  // at y 18.4, 11.2 and 7.4) and the follow camera converges over frames, so at llvmpipe's 2 fps
+  // it arrives 10 m *below* the player, inside the hillside — the anchor 1.6 m over a monument
+  // then sits far above the top of the frame and `overlay.note` correctly draws nothing. That is
+  // what the recorded call says, so it is printed either way rather than left as an empty list.
+  check('and a walk-and-interact lighting says how many are left, in a toast',
+    afterClick.toasts.some((t) => t === `已点亮 1/${nodes.length}`),
+    `toasts ${JSON.stringify(afterClick.toasts)} note calls ${JSON.stringify(afterClick.noteCalls)}`);
   check('a lit monument\'s prompt is spent',
     (await p.evaluate((id) => {
       const g = window.game;
@@ -485,8 +510,22 @@ try {
     check(`monument ${i} prompts with the running count`,
       st.prompt?.id === nodes[i].id && st.prompt?.sub === `${poi.name} ${i}/${nodes.length}`,
       JSON.stringify(st.prompt));
+    const notesBefore = (await state()).noteCalls.length;
     await p.keyboard.press('KeyF');
     check(`F lights monument ${i}`, await waitLit(i + 1), `lit ${await litCount()}`);
+    // The other half of "it says how many are left": at the monument. `standAt` teleports and the
+    // camera is settled behind the player, so here the anchor does project — and the assertion
+    // demands exactly that, off the recorded projection, so a note that was dropped off the top
+    // of the frame cannot pass as one the player read. The last monument solves the ring and
+    // takes the reward branch, which says its piece in toasts instead.
+    if (i < nodes.length - 1) {
+      await sleep(600);
+      const st2 = await state();
+      const call = st2.noteCalls.slice(notesBefore).find((c) => c.text === `${i + 1}/${nodes.length}`);
+      check(`and monument ${i} says how many are left at the monument, on screen`,
+        !!call && !!call.pt && st2.notes.includes(`${i + 1}/${nodes.length}`),
+        `notes ${JSON.stringify(st2.notes)} call ${JSON.stringify(call ?? null)}`);
+    }
   }
   await shot('solved');
   const solved = await state();

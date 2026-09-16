@@ -33,15 +33,31 @@ import { Animator } from '../gfx/animator.js';
  * Per-kind streaming parameters.
  *   cell   — grid size in metres
  *   rings  — how many cells out from the player's cell to keep resident
+ *   reach  — metres of guaranteed cover in *every* direction, instead of `rings`
  *   budget — hard cap on instances per cell, so a dense recipe cannot explode
+ *
+ * `rings` and `reach` are two answers to the same question and a group takes exactly one.
+ * `rings` keeps a square block about the player's own cell, so what it guarantees is one
+ * cell — the far edge lands anywhere between `cell` and `2 * cell` metres out depending on
+ * where in its cell the player happens to stand. That is fine for the 96 m groups, whose
+ * edge is well past the fog. It is not fine for the ground under the player's nose: a 24 m
+ * guarantee is inside the band where .run/grass-fade-lab.mjs still measures 15-25 % tuft
+ * coverage, so the seam is visible and it slides as you walk. `reach` asks the question in
+ * metres instead: keep every cell whose rectangle comes within `reach`, which costs the
+ * lucky diagonals (invisible at 5-9 % coverage) and buys a floor that does not move.
+ *
+ * Exported because `tools/stream-check.mjs` gates it: that a group takes one of the two and not
+ * both, that `RESTREAM_STEP` is finer than every cell a `reach` group moves (the rule the old
+ * 32 m trigger broke), and — by flipping grass back to `rings` in this very table — that the
+ * measured 32 m of carpet ahead is bought by `reach` rather than by luck.
  */
-const STREAM = {
+export const STREAM = {
   // Grass on a 24 m cell rather than 48: the budget is what is affordable per
   // *frame*, so spending it over a 144 m span puts most of it beyond the distance
   // any of it is legible, and starves the ten metres in front of the player where
-  // the ground is being examined. Three rings of 24 m still cover 72 m.
-  grass:    { cell: 24, rings: 1, budget: 1750, variants: 3, outline: false, sway: true, shadow: false },
-  flowers:  { cell: 32, rings: 1, budget: 200, variants: 3, outline: false, shadow: false },
+  // the ground is being examined.
+  grass:    { cell: 24, reach: 32, budget: 1750, variants: 3, outline: false, sway: true, shadow: false },
+  flowers:  { cell: 32, reach: 40, budget: 200, variants: 3, outline: false, shadow: false },
   // Fewer, larger cells for the long-range kinds. Each resident cell costs one
   // InstancedMesh per (variant, material) whatever it holds, so 49 tree cells at
   // 64 m was ~440 draw calls to cover the same 240 m that 25 cells at 96 m cover in
@@ -52,6 +68,25 @@ const STREAM = {
   rocks:    { cell: 96, rings: 2, budget: 85, variants: 3 },
   crystals: { cell: 96, rings: 2, budget: 60, variants: 3 },
 };
+
+/**
+ * How far the player may walk before residency is recomputed, in metres.
+ *
+ * This used to be `floor(px / 32) !== lastCellX`, a 32 m grid — coarser than the 24 m grass
+ * cell it was supposed to keep centred, so the block could lag a whole cell and the carpet
+ * ended *9 metres* in front of the player's feet before snapping back out to 32 m in one step
+ * (.run/grass-stream-lab.mjs, walking +x through x=63). A group with `reach` therefore
+ * guarantees `reach - RESTREAM_STEP` metres, and the number is a guarantee rather than a
+ * coincidence only because the trigger is now finer than every cell it moves.
+ *
+ * 3 m and not 12: walking a fixed distance builds the same cells either way — each one enters
+ * range once and leaves once — so a finer trigger does not build more, it builds sooner and
+ * spends the floor it buys (29 m of the grass group's 32) on the near ground instead of on the
+ * far corners. What a restream does cost is a scan of ~200 candidate cells plus an eviction pass
+ * over the resident ones, which is microseconds, and the 3 m dead band is what stops a player
+ * jittering across a cell boundary from rebuilding it every frame.
+ */
+export const RESTREAM_STEP = 3;
 
 const DENSITY_BY_QUALITY = { low: 0.30, medium: 0.60, high: 1.0, ultra: 1.3 };
 // Named rather than inline, because the quality governor now changes tiers at runtime and
@@ -219,8 +254,14 @@ export class World {
     this.blockGrid = new Map();
     this.cellBlockers = new Map();   // cell key → the blockers it contributed
 
-    this._lastCellX = null;
-    this._lastCellZ = null;
+    // The residency table this world is actually reading. Named on the instance because the
+    // module-level `STREAM` is not reachable from a page: Vite hands out `world.js?t=…` after an
+    // edit, so a probe that imports the module gets a *second* copy of the table — same numbers,
+    // different object — and a mutation applied to it changes nothing the game does. That is
+    // exactly how `tools/stream-check.mjs` first reported a 3x3 block scoring identically to a
+    // 32 m radius, down to the last tuft.
+    this.stream = STREAM;
+    this._streamAt = null;       // where residency was last computed, or null for "stale"
     this._t = 0;
   }
 
@@ -830,7 +871,7 @@ export class World {
 
   /** Build the scatter for one cell of one recipe. */
   _buildCell(rec, cx, cz) {
-    const cfg = STREAM[rec.group];
+    const cfg = this.stream[rec.group];
     const key = this._cellKey(rec.group, cx, cz);
     if (this.cells.has(key)) return;
 
@@ -948,23 +989,47 @@ export class World {
     for (const f of fields) f.release();
   }
 
+  /**
+   * Squared distance in metres from `(px, pz)` to cell `(gx, gz)`'s rectangle — 0 for the cell
+   * the point is standing in. This is the quantity both residency tests and the build order want:
+   * a cell's *index* offset says nothing about how near its ground is when the player is standing
+   * at one of its corners.
+   */
+  _cellDist2(cfg, gx, gz, px, pz) {
+    const ex = Math.max(gx * cfg.cell - px, px - (gx + 1) * cfg.cell, 0);
+    const ez = Math.max(gz * cfg.cell - pz, pz - (gz + 1) * cfg.cell, 0);
+    return ex * ex + ez * ez;
+  }
+
   /** Recompute which cells should be resident. */
   _restream(px, pz) {
     const wanted = new Set();
+    // Rebuilt from scratch rather than appended to. `pending` outlives a restream, and the
+    // trigger is now a few metres of walking instead of a 32 m grid step, so a queue that only grew
+    // would spend its frame budget building cells the next restream is about to evict — and
+    // would keep sorting them by a distance measured from where the player used to be.
+    const queue = [];
     for (const rec of this.recipes) {
-      const cfg = STREAM[rec.group];
+      const cfg = this.stream[rec.group];
       const cx = Math.floor(px / cfg.cell);
       const cz = Math.floor(pz / cfg.cell);
-      for (let dz = -cfg.rings; dz <= cfg.rings; dz++) {
-        for (let dx = -cfg.rings; dx <= cfg.rings; dx++) {
-          // Round the corners of the square ring: the diagonal cell of a 3-ring
-          // grid is 4.2 cells away and never visible through the fog.
-          if (dx * dx + dz * dz > (cfg.rings + 0.5) * (cfg.rings + 0.5)) continue;
-          const key = this._cellKey(rec.group, cx + dx, cz + dz);
-          wanted.add(key);
-          if (!this.cells.has(key)) {
-            this.pending.push({ rec, cx: cx + dx, cz: cz + dz, key, d: dx * dx + dz * dz });
+      // A `reach` group scans far enough out that the metre test, not the loop bound, is what
+      // stops it: a cell `span` out has its near edge (span - 1) * cell away.
+      const span = cfg.reach ? Math.ceil(cfg.reach / cfg.cell) + 1 : cfg.rings;
+      for (let dz = -span; dz <= span; dz++) {
+        for (let dx = -span; dx <= span; dx++) {
+          const gx = cx + dx, gz = cz + dz;
+          const d = this._cellDist2(cfg, gx, gz, px, pz);
+          if (cfg.reach) {
+            if (d > cfg.reach * cfg.reach) continue;
+          } else if (dx * dx + dz * dz > (cfg.rings + 0.5) * (cfg.rings + 0.5)) {
+            // Round the corners of the square ring: the diagonal cell of a 3-ring
+            // grid is 4.2 cells away and never visible through the fog.
+            continue;
           }
+          const key = this._cellKey(rec.group, gx, gz);
+          wanted.add(key);
+          if (!this.cells.has(key)) queue.push({ rec, cx: gx, cz: gz, key, d });
         }
       }
     }
@@ -972,8 +1037,10 @@ export class World {
     for (const key of [...this.cells.keys()]) {
       if (!wanted.has(key)) this._disposeCell(key);
     }
-    // Nearest first, so what the player is looking at appears first.
-    this.pending.sort((a, b) => a.d - b.d);
+    // Nearest first, so what the player is looking at appears first. In metres, so a queue
+    // holding 24 m grass cells and 96 m tree cells at once still builds the near ground first.
+    queue.sort((a, b) => a.d - b.d);
+    this.pending = queue;
   }
 
   /** Build queued cells under a time budget so streaming never drops a frame. */
@@ -994,8 +1061,7 @@ export class World {
       const job = this.pending.shift();
       if (!this.cells.has(job.key)) this._buildCell(job.rec, job.cx, job.cz);
     }
-    this._lastCellX = Math.floor(x / 32);
-    this._lastCellZ = Math.floor(z / 32);
+    this._streamAt = [x, z];
   }
 
   /* ----------------------------------------------------------------- frame -- */
@@ -1056,12 +1122,14 @@ export class World {
       this.water.position.z = pz;
     }
 
-    // Restream on a 32 m hysteresis grid rather than every frame: the cell math
-    // is cheap but the eviction scan over every resident cell is not.
-    const gx = Math.floor(px / 32), gz = Math.floor(pz / 32);
-    if (gx !== this._lastCellX || gz !== this._lastCellZ) {
-      this._lastCellX = gx;
-      this._lastCellZ = gz;
+    // Restream after `RESTREAM_STEP` metres of walking rather than every frame: the cell math
+    // is cheap but the eviction scan over every resident cell is not. A *distance* from the last
+    // restream, not a grid index, because a grid coarser than the cells it recentres turns every
+    // group's `reach` into a coincidence — see RESTREAM_STEP.
+    const sdx = this._streamAt ? px - this._streamAt[0] : 0;
+    const sdz = this._streamAt ? pz - this._streamAt[1] : 0;
+    if (!this._streamAt || sdx * sdx + sdz * sdz > RESTREAM_STEP * RESTREAM_STEP) {
+      this._streamAt = [px, pz];
       this._restream(px, pz);
     }
     this._drainPending(2.5);
@@ -1248,8 +1316,7 @@ export class World {
     this.weather.setCount(WEATHER_COUNT_BY_QUALITY[q] ?? 4000);
     // Density changed, so every resident cell is stale.
     for (const key of [...this.cells.keys()]) this._disposeCell(key);
-    this._lastCellX = null;
-    this._lastCellZ = null;
+    this._streamAt = null;
   }
 
   dispose() {

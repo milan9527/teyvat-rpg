@@ -392,7 +392,29 @@ await p.evaluate(() => {
   window.__wxHud = (on) => {
     for (const el of document.querySelectorAll('[data-hud], #world-overlay')) el.style.visibility = on ? '' : 'hidden';
   };
-  window.__wxRender = () => { for (let i = 0; i < 3; i++) g.r.render(0.016); };
+  // The one transient that lives in the renderer, and the reason 龙脊's vista could not be
+  // photographed twice. `Renderer._flash` is raised to 0.3 by every unblocked hit on the local
+  // player (game.js:1673) and decays *inside* `render(dt)` — so on a stopped page it is the one
+  // piece of state that changes from one hand-driven frame to the next. 龙脊雪山 has 严寒: the
+  // server keeps ticking cold damage down the socket while the loop is stopped, so the flash is
+  // re-raised between shots forever. `uFlash` is a rim by `uFlashEdge`, growing with r², which is
+  // exactly the shape the diff had: the whole top and bottom rows of the frame moving by a mean of
+  // 7 counts while the middle of the picture moved by 0. Two frames of one pinned state differed
+  // by 225k px, and the fog mutation the section is built on (390k px) was measured against it.
+  // Zeroed before every render and *reported*, because "no shot carried a red plate" is a claim
+  // the tally has to be able to make. Same defect as `tools/react-check.mjs`'s `__canon`.
+  window.__wxFlashLog = { renders: 0, live: 0, peak: 0 };
+  window.__wxCalm = () => {
+    const u = g.r.grade.uniforms, was = Math.max(g.r._flash || 0, u.uFlash.value);
+    const L = window.__wxFlashLog;
+    L.renders++;
+    if (was > 0) L.live++;
+    L.peak = Math.max(L.peak, +was.toFixed(4));
+    g.r._flash = 0;
+    u.uFlash.value = 0;
+    return was;
+  };
+  window.__wxRender = () => { for (let i = 0; i < 3; i++) { window.__wxCalm(); g.r.render(0.016); } };
   window.__wxPin = (day, hour) => {
     const ok = g.setWorldTime(hour, day);
     window.__wxRender();
@@ -516,10 +538,39 @@ await p.evaluate(() => { const g = window.game; g.stop(); window.__wxAim(0.6); }
 // existed its first shot was silently the *walking* camera's frame. It passed anyway, because the
 // band it measures happened to be sky in both, and it only started failing when a fog change
 // repainted the hillside that was in the rect. Two renders and 250 ms per shot removes the class.
+// ...and 250 ms was the wrong way to say "one more frame". A screenshot returns the surface the
+// compositor holds, and the compositor only takes a frame when the paint cycle completes, so the
+// wait has to be counted in *frames*. On llvmpipe a Mondstadt frame at `high` measures 472 ms
+// (.run/stream-cost-lab.mjs, with a 1x1 readPixels to make the driver finish), which is longer
+// than the sleep — the class the comment above says was removed came straight back the moment the
+// grass carpet grew 23 % denser, and the dome shot was the walking camera's frame again.
+// Rendering *inside* rAF ties each render to a paint, and one more rAF after the last one is the
+// compositor's turn. `presented` counts them so a throttled page shows up as an assertion rather
+// than as a stale picture.
+let presented = 0, presentSlow = 0;
+const present = async (frames = 2) => {
+  const got = await p.evaluate((k) => new Promise((res) => {
+    const g = window.game;
+    let i = 0;
+    const t0 = performance.now();
+    const done = (raf) => res({ i, raf, ms: Math.round(performance.now() - t0) });
+    // A page whose rAF is throttled (an unfocused window, a second tab) would hang here, and a
+    // hang reads as a timeout 20 minutes later. Fall back to the timer, and say so.
+    const bail = setTimeout(() => done(false), 6000);
+    const tick = () => {
+      window.__wxCalm();                       // the hit flash 严寒 keeps re-raising — see above
+      g.r.render(0.016);
+      if (++i >= k) requestAnimationFrame(() => { clearTimeout(bail); done(true); });
+      else requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  }), frames);
+  presented++;
+  if (!got.raf) presentSlow++;
+  return got;
+};
 const shoot = async (file) => {
-  await p.evaluate(() => window.__wxRender());
-  await sleep(250);
-  await p.evaluate(() => window.__wxRender());
+  await present(2);
   await p.screenshot({ path: `${outDir}/${file}.png` });
   return decodePng(fs.readFileSync(`${outDir}/${file}.png`));
 };
@@ -702,6 +753,12 @@ const atmosphere = async (label, calm, storm, tagBase) => {
       + ` | far lum ${far.lum} rgb ${far.rgb.join()} sat ${satOf(far.rgb).toFixed(3)}`);
     console.log(`    settle ${settle} px → floor ${floorPx} px, near sat ±${(floorNear * 100).toFixed(1)}%,`
       + ` far sat ±${(floorFar * 100).toFixed(1)}%`);
+    // The floor is the bar every mutation below is priced against, so it is worth stating as a
+    // claim of its own rather than only printing it: with the loop stopped and the state pinned,
+    // two hand-driven frames have to be the same picture. It was 225k px in 龙脊 for as long as the
+    // hit flash 严寒 raises went unpinned — a bar no honest mutation could clear.
+    check(`${label}: two frames of one pinned state are the same picture (${tag.split('-').pop()})`,
+      floorPx < W * H * 0.03, `floor ${floorPx} px of ${W * H} (settle ${settle} px)`);
     return { img, st, near, far, precipWas, settle, floorPx, floorNear, floorFar,
       nearSat: satOf(near.rgb), farSat: satOf(far.rgb) };
   };
@@ -953,8 +1010,12 @@ const travel = async (zone) => p.evaluate(async (z) => {
   return g.zoneId === z && g.quality === 'high';
 }, zone);
 
+// Whether the run stood in a zone with 严寒 at all — the tally's transient assertion is a claim
+// about this run, and it can only be made where the mechanic that raises the flash exists.
+let cold = false;
 if (!await travel('dragonspine')) skipped('the blizzard section', 'the zone transition did not take');
 else {
+  cold = true;
   await p.evaluate(() => window.__wxHud(false));
   // The atmosphere section again, in the zone with the thickest authored air (0.0042, 2.6× 蒙德's)
   // and the worst storm — this is where the two atmospheres were most visible, and it is the reading
@@ -1042,6 +1103,27 @@ console.log(`\nerrors -> ${errs.length ? errs.slice(0, 4).join(' | ') : 'none'}`
 console.log(`hmr    -> ${hmr.length ? hmr.length : 'none'}`);
 check('no page errors while the weather turned', errs.length === 0, errs.slice(0, 2).join(' | '));
 check('client/src was not hot-updated mid-run', hmr.length === 0, `${hmr.length} HMR events`);
+// Every rect reading in this probe is taken off a screenshot, so every one of them rests on the
+// compositor having the frame that was just rendered. That is a claim about this run, not about
+// the code, and it is cheap to state: if rAF was throttled and any shot fell back to the timer,
+// the pictures above may be of the previous camera.
+check('every shot waited for the paint cycle rather than for a timer',
+  presentSlow === 0 && presented >= 12,               // 20 shots on a full run; a floor, not a count
+  `${presented} shots presented, ${presentSlow} fell back`);
+// And the same claim for the one piece of renderer state a stopped page still changes. The pin is
+// only worth having if it fired, so the count of renders that found a live flash is the assertion:
+// 严寒 damage arrives on the socket whether or not the loop is running, so a run that visited
+// 龙脊雪山 and never saw one has either lost the socket or lost the mechanic.
+const flash = await p.evaluate(() => window.__wxFlashLog);
+console.log(`transients -> hit flash live on ${flash.live} of ${flash.renders} renders,`
+  + ` peak ${flash.peak}, zeroed before each one`);
+if (cold) {
+  check('the sheer cold kept flashing the frame, and every shot was taken with it pinned',
+    flash.live > 0 && flash.peak > 0 && flash.renders > 40,
+    `live on ${flash.live}/${flash.renders} renders, peak ${flash.peak}`);
+} else {
+  skipped('the sheer cold kept flashing the frame', 'the 龙脊雪山 section did not run');
+}
 
 console.log(`\n${pass} passed, ${fail} failed, ${skip} skipped`);
 console.log(`shots -> ${outDir}`);
