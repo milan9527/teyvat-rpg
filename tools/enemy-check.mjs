@@ -933,6 +933,68 @@ console.log('\n=== 11. what an elemental creature lands on a player');
       `${spent} hp over the remaining window, then ${Math.round(held - p.hp)} hp in the 3 s after`);
   }
 
+  /**
+   * The second application, which is the one a camp actually delivers.
+   *
+   * Everything above fires the reaction **once**, and `dots.length === 1` is equally true of a
+   * build that refreshes the dot and one that pushes a parallel one per application — the tick
+   * loop pays every entry in the list, so pushing makes the drain
+   * `applications-in-the-last-4-s × the authored rate`. The camp player-aura-check walks into is
+   * two 雷史莱姆 (attackCd 2.6) and one 水史莱姆 (2.0); alternating them holds a mean of 4 dots
+   * and drained 6.09 %/s instead of 2.10 %/s, killing a full-health Lv.30 party in 17.7 s and
+   * taking that probe's fixture down before it could photograph anything.
+   *
+   * Both directions, because "one dot" alone is also true of a build that ignores the second
+   * application altogether — and that would end the reaction early instead of late.
+   */
+  {
+    const { inst, p } = victim();
+    const el = ENEMIES.slimeElectro.element;
+    // Alternate the camp's own two elements at the camp's own cadence for ten seconds.
+    const cds = [ENEMIES.slimeWater.attackCd, ENEMIES.slimeElectro.attackCd];
+    let next = [0, 0.6], hits = 0;
+    const hp0 = p.hp;
+    inst.events.length = 0;
+    for (let i = 0; i < Math.round(10 / DT); i++) {
+      inst.now += DT;
+      for (const k of [0, 1]) {
+        if (inst.now < next[k]) continue;
+        next[k] += cds[k];
+        hits++;
+        p.aura.apply(k ? el : ENEMIES.slimeWater.element, ENEMIES.slimeWater.gauge, inst.now);
+      }
+      inst.updatePlayer(p, DT);
+    }
+    const ticks = inst.events.filter((x) => x.t === S2C.DAMAGE && x.d?.kind === 'dot').length;
+    const rate = (hp0 - p.hp) / p.maxHp() / 10 * 100;
+    // Derived from one application rather than written down twice: `frac` is the reaction's own
+    // number, and 0.35 is `updatePlayer`'s tick factor (a literal there, not exported).
+    const one = new AuraState();
+    one.apply(ENEMIES.slimeWater.element, 1, 0);
+    one.apply(el, 1, 0);
+    const authored = (one.dots[0]?.frac || 0) * 0.35 * 100;
+    check('a camp that re-applies 感电 drains at the authored rate, not once per application',
+      p.aura.dots.length <= 1 && ticks <= 11 && rate < authored * 1.35,
+      `${hits} hits in 10 s → ${ticks} tick(s), ${p.aura.dots.length} dot(s) live,`
+      + ` ${rate.toFixed(2)} %/s of max hp against ${authored.toFixed(2)} %/s authored`);
+    // ...and the re-application is not simply dropped: the window has to reach past where the
+    // first one alone would have ended.
+    const solo = victim();
+    solo.p.aura.apply('water', 1, 0);
+    solo.p.aura.apply(el, 1, 0);
+    const firstUntil = solo.p.aura.dots[0]?.until;
+    solo.p.aura.apply('water', 1, 3.0);
+    solo.p.aura.apply(el, 1, 3.0);
+    const after = solo.p.aura.dots[0]?.until;
+    solo.p.aura.update(0.1, 5.0);
+    const aliveAt5 = solo.p.aura.dots.length;
+    solo.p.aura.update(0.1, 7.1);
+    check('...and re-applying it extends the window rather than being ignored',
+      after > firstUntil && aliveAt5 === 1 && solo.p.aura.dots.length === 0,
+      `until ${firstUntil} → ${after} after a hit at 3.0 s; ${aliveAt5} live at 5 s`
+      + ` (past the first window), ${solo.p.aura.dots.length} at 7.1 s`);
+  }
+
   // 超导 on the player: the same shred `playerHitEnemy` has always read on the way out.
   // Measured as a pair, because a lone number cannot tell 减防 from a damage roll.
   {

@@ -147,7 +147,19 @@ export class AuraState {
         this.defShredUntil = now + reaction.defShredTime;
       }
       if (reaction.key === 'electroCharged') {
-        this.dots.push({ element: 'lightning', frac: 0.06, until: now + reaction.dot, tick: 0 });
+        // One dot per element, its window **refreshed** — not one independent dot per application.
+        //
+        // `updatePlayer`/`updateEnemy` tick every entry in this list, and each entry costs a fixed
+        // fraction of max hp per second, so pushing meant the drain was really
+        // `applications-in-the-last-4-s × the authored rate`. The camp player-aura-check walks into
+        // (two 雷史莱姆 at attackCd 2.6 and one 水史莱姆 at 2.0) alternates the pair about once a
+        // second, which holds a mean of 4 dots: 6.09 %/s instead of the 2.10 %/s written here, and
+        // a full-health Lv.30 party dead in 17.7 s. It scales with the size of the camp and nothing
+        // caps it. `tick` is deliberately carried over rather than reset, so a re-application
+        // neither grants a free tick nor starves the next one by pushing its phase back.
+        const live = this.dots.find((d) => d.element === 'lightning');
+        if (live) live.until = Math.max(live.until, now + reaction.dot);
+        else this.dots.push({ element: 'lightning', frac: 0.06, until: now + reaction.dot, tick: 0 });
       }
       // Wind/earth do not leave their own aura.
       if (element !== 'wind' && element !== 'earth') {

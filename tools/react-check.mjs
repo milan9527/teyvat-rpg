@@ -1244,17 +1244,35 @@ try {
     const h = e.actor.height || 1.6;
     const r = g.r.renderer.domElement.getBoundingClientRect();
     const M = 24;
-    let pt = null, frac = null;
+    let pt = null, frac = null, best = Infinity;
     const alts = [];
+    // The *closest to being clickable*, not the first one tried. Keeping the first off-screen
+    // candidate picked the creature's waist at y = 784 over its head at y = 667 — 117 px further
+    // out of a 640 px frame — and then reported the worse number as the reason nothing was
+    // clicked. When something is inside the margin it still wins immediately.
+    const howFar = (q) => Math.max(0, M - q.x, q.x - (r.width - M), M - q.y, q.y - (r.height - M));
     for (const f of [0.5, 0.75, 1.0]) {
       const q = g.overlay.project(e.x, e.y + h * f, e.z, Infinity);
       alts.push(q ? { f, x: Math.round(q.x), y: Math.round(q.y) } : { f, x: null, y: null });
       if (!q) continue;
-      const inside = q.x > M && q.x < r.width - M && q.y > M && q.y < r.height - M;
-      if (pt && !inside) continue;
-      pt = q; frac = f;
-      if (inside) break;
+      const out = howFar(q);
+      if (pt && out >= best) continue;
+      pt = q; frac = f; best = out;
+      if (!out) break;
     }
+    // The camera the projection came out of, so a click point that fell off the frame can say
+    // *why*. `project` was given an infinite margin, so a null is "behind the near plane", not
+    // "outside the viewport" — a distinction that decides whether pitching can help at all.
+    const cam = g.r.camera;
+    const rig = { pitch: +g.rig.pitch.toFixed(3), dist: +g.rig.dist.toFixed(2),
+      now: +(g.rig._distNow ?? g.rig.dist).toFixed(2), yaw: +g.rig.yaw.toFixed(2),
+      camY: +cam.position.y.toFixed(2), meY: +g.me.y.toFixed(2), eY: +e.y.toFixed(2),
+      fov: cam.fov, drop: +(g.me.y - e.y).toFixed(2),
+      // Where the creature sits relative to where the camera is pointing, in degrees: the
+      // quantity a pitch drag moves, and the one a half-FOV has to cover.
+      below: +((Math.atan2(cam.position.y - (e.y + h * 0.5),
+        Math.hypot(e.x - cam.position.x, e.z - cam.position.z)) * 180 / Math.PI)
+        - (g.rig.pitch * 180 / Math.PI)).toFixed(1) };
     const yaw = Math.atan2(e.x - g.me.x, e.z - g.me.z);
     let err = yaw - g.rig.yaw;
     while (err > Math.PI) err -= Math.PI * 2;
@@ -1266,7 +1284,7 @@ try {
       x: pt ? Math.round(r.left + pt.x) : null, y: pt ? Math.round(r.top + pt.y) : null,
       w: Math.round(r.width), h: Math.round(r.height), err: +err.toFixed(2), px: Math.round(px),
       cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2),
-      frac, alts, height: +h.toFixed(1),
+      frac, alts, height: +h.toFixed(1), rig,
     };
   }, id);
 
@@ -1278,11 +1296,28 @@ try {
    * gesture for it — `input.js` only lets the right and middle buttons orbit (a left drag is a
    * steering gesture), and `_rightClick` deliberately does not fire for a press that moved.
    */
-  const faceCreature = async (id) => {
+  /**
+   * ...and the axis it drags has an end.
+   *
+   * `CameraRig` clamps pitch to `MAX_PITCH = 1.16` rad, and the fixture this section fights — a
+   * 遗迹守卫 that spawns **3.86 m below** the ledge the walk-in ends on — is still 17.9° under the
+   * view axis when the clamp is reached: its middle projects to y ≈ 612 of a 640 px frame, inside
+   * the viewport but under this loop's 50 px margin. So passes 4, 5 and 6 dragged 110 px, moved
+   * the subject **one pixel**, and the sign heuristic (which flips whenever a pass does not
+   * improve) read the saturated axis as a wrong guess and thrashed. That is the whole failure:
+   * `clicking the creature locks onto it` refused a point a click would have taken.
+   *
+   * Two answers, in the order a player would try them. Take the point if the *viewport* has it,
+   * once pitch has stopped responding — the margin is a preference, not a requirement. And if it
+   * is genuinely outside, stop turning and **step back**: distance is the other way to raise
+   * something in frame, and `approach` is the product's own locomotion.
+   */
+  const faceCreature = async (id, backedOff = false) => {
     let at = await screenPos(id);
     // Which way a downward drag moves the subject. Corrected by what the drag actually did rather
     // than derived, because `orbit`'s pitch sign is one line in `input.js` and this is a probe.
     let pitch = 1;
+    let stuck = 0;
     for (let i = 0; i < 6 && at; i++) {
       const margin = 50;
       const offX = at.x == null || at.x < margin || at.x > at.w - margin;
@@ -1305,11 +1340,38 @@ try {
       await p.mouse.up({ button: 'right' });
       await sleep(700);
       const next = await screenPos(id);
-      // Did the pitch guess help? If the subject went *further* from the middle of the frame it
-      // did not, and the next pass drags the other way.
-      if (dy && next && at.y != null && next.y != null
-        && Math.abs(next.y - at.h / 2) > Math.abs(at.y - at.h / 2)) pitch = -pitch;
+      // Every pass says what it did and what moved, because a loop whose only feedback is a
+      // projection has to prove the projection changed at all — six drags that each moved
+      // nothing look exactly like six drags that were aimed the wrong way.
+      console.log(`  (orbit ${i + 1}: drag ${dx},${dy} → y ${at.y} → ${next?.y}`
+        + `, pitch ${at.rig?.pitch} → ${next?.rig?.pitch}, ${at.rig?.below}° below the axis`
+        + `, boom ${at.rig?.now} m, drop ${at.rig?.drop} m, alts ${JSON.stringify(next?.alts)})`);
+      // A drag that asked for pitch and got none is the clamp, not a wrong guess — three of those
+      // and there is nothing left to turn. Told apart from a wrong guess by the *pitch* the rig
+      // reports rather than by the projection, because at the clamp the projection moves a pixel
+      // or two on its own and no amount of reading y can tell which happened.
+      const moved = dy && next?.rig && at.rig
+        && Math.abs(next.rig.pitch - at.rig.pitch) > 0.01;
+      if (dy && !moved) stuck++;
+      else if (dy && next && at.y != null && next.y != null
+        && Math.abs(next.y - at.h / 2) > Math.abs(at.y - at.h / 2)) {
+        // Did the pitch guess help? If the subject went *further* from the middle of the frame it
+        // did not, and the next pass drags the other way.
+        pitch = -pitch;
+      }
       at = next;
+      if (stuck >= 3 && at) {
+        const has = at.x != null && at.x > 0 && at.x < at.w && at.y > 0 && at.y < at.h;
+        console.log(`  (the camera is at its pitch clamp (${at.rig?.pitch} rad) with the creature`
+          + ` ${at.rig?.below}° under the axis and ${at.rig?.drop} m below us`
+          + `${has ? ' — taking the point the viewport does have' : ' — stepping back instead'})`);
+        if (has) return at;
+        if (backedOff) return at;
+        // Distance is the other axis. Walk out to where the drop stops filling the frame and try
+        // the turn once more, from further away.
+        await approach(id, Math.min(9, (at.rig?.drop || 0) + 5), 20000, 1.2);
+        return faceCreature(id, true);
+      }
     }
     return at;
   };
@@ -1764,6 +1826,11 @@ try {
           + ` (${lockSeen.at.frac ?? '?'} up a ${lockSeen.at.height ?? '?'} m body`
           + `${lockSeen.at.alts ? `, tried ${JSON.stringify(lockSeen.at.alts)}` : ''})`
         : 'off-screen'}`
+      // Where the camera was when that point was computed. Without it, a click point below the
+      // frame is unattributable: this fixture stands in a 3.86 m hollow, and the rig's pitch
+      // clamp (1.16 rad) leaves it 17.9° under the view axis however hard the probe drags.
+      + `${lockSeen.at?.rig ? ` [pitch ${lockSeen.at.rig.pitch}, ${lockSeen.at.rig.below}° under`
+        + ` the axis, ${lockSeen.at.rig.drop} m below us, boom ${lockSeen.at.rig.now} m]` : ''}`
       : 'never clicked (no attempt got that far)');
   check(`pressing ${plan.auraSlot + 1} puts ${CHARACTERS[plan.auraChar].name} on the field`,
     !!castA && castA.char === plan.auraChar, castA ? `slot ${castA.slot} = ${castA.char}` : 'never pressed');

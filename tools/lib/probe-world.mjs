@@ -144,10 +144,17 @@ export const worldHelpers = (p) => {
    * back home by the next snapshot. Re-issued every couple of seconds because the creature is
    * walking too (usually towards us: it aggroes long before we arrive).
    */
-  const approach = async (id, want, budgetMs, tol = 1.2) => {
+  /**
+   * `onTick` runs once per poll, and exists because a walk is not a pause in the fight. A probe
+   * that keeps its party alive between polls stops keeping it alive for the whole of an
+   * `approach` — player-aura-check walked the last two metres into a camp of four with a budget
+   * of 20 s and arrived dead, so the loop that eats never ran a single iteration.
+   */
+  const approach = async (id, want, budgetMs, tol = 1.2, onTick = null) => {
     const t0 = Date.now();
     let st = await look(id);
     while (Date.now() - t0 < budgetMs) {
+      if (onTick && (await onTick(st)) === false) return st;
       if (!st.tgt) return st;
       if (Math.abs(st.tgt.d - want) <= tol) return st;
       await p.evaluate(({ id: eid, want: w }) => {
@@ -161,6 +168,7 @@ export const worldHelpers = (p) => {
       }, { id, want });
       await sleep(2000);
       st = await look(id);
+      if (onTick && (await onTick(st)) === false) return st;
     }
     return st;
   };

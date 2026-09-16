@@ -638,24 +638,6 @@ try {
   const nearestOther = async (au) => (await census()).filter((e) => inCamp(e) && elOf(e)
     && elOf(e) !== 'physical' && elOf(e) !== au && resolveReaction(elOf(e), au))
     .sort((a, c) => a.d - c.d)[0] || null;
-  let mob = await nearest();
-  console.log(`  (camp: ${(await census()).map((e) => `${e.name} Lv.${e.lv} @${e.d}m`).join(', ')})`);
-  if (mob) await approach(mob.id, 2.4, 60000, 0.9);
-  mob = await nearest();
-  check('stood next to a creature that can attach something',
-    !!mob && mob.d <= 5, mob ? `${mob.name} Lv.${mob.lv} at ${mob.d} m` : 'none of the camp is in the page');
-
-  /**
-   * Stand there and be hit.
-   *
-   * Nothing is pressed from here on: the simulation soaks the player with 水 (gauge 1, which
-   * `auraDecayFor` keeps alive for seconds) and then a 雷 orb turns it into 感电 — on the server,
-   * by `damagePlayer` → `AuraState.apply` → `resolveReaction`, with no client involvement at all.
-   * The wait ends when **both** halves are in hand: a reaction has been latched, and the wire has
-   * an aura on the player *right now*, because the pixel work below needs a live attachment to
-   * freeze on. The two are independent — the reaction consumes what it reacted with — so this
-   * polls for the pair rather than for either one.
-   */
   const state = () => p.evaluate(() => {
     const g = window.game;
     const you = (g.socket.latest()?.players || []).find((r) => Number(r.id) === Number(g.playerId));
@@ -681,8 +663,46 @@ try {
     if (!id) return null;
     try { await g.useConsumable(id); return id; } catch (e) { return `refused:${e?.code || e?.message}`; }
   });
+  let ate = [], lastAte = 0;
+  /**
+   * Keep the fixture standing — during the walk in as well as during the soak.
+   *
+   * This used to live only inside the soak loop, so the last two metres into the camp (an
+   * `approach` with a 20 s budget, polled every 2 s) were unmanaged: the party crossed from
+   * 2983 hp to 0 inside it and the soak loop ran exactly one iteration, on a corpse. Passed to
+   * `approach` as its `onTick`, it returns false when there is nothing left to keep alive.
+   */
+  const keepAlive = async () => {
+    const st = await state();
+    if (!st.alive) return false;
+    if (st.maxHp && st.hp < st.maxHp * 0.55 && Date.now() - lastAte > 2500) {
+      lastAte = Date.now();
+      const dish = await eat();
+      if (dish) ate.push(dish);
+      console.log(`  (hp ${st.hp}/${st.maxHp} — ate ${dish || 'nothing: the pantry is empty'})`);
+    }
+    return true;
+  };
+  let mob = await nearest();
+  console.log(`  (camp: ${(await census()).map((e) => `${e.name} Lv.${e.lv} @${e.d}m`).join(', ')})`);
+  if (mob) await approach(mob.id, 2.4, 60000, 0.9, keepAlive);
+  mob = await nearest();
+  check('stood next to a creature that can attach something',
+    !!mob && mob.d <= 5, mob ? `${mob.name} Lv.${mob.lv} at ${mob.d} m` : 'none of the camp is in the page');
+
+  /**
+   * Stand there and be hit.
+   *
+   * Nothing is pressed from here on: the simulation soaks the player with 水 (gauge 1, which
+   * `auraDecayFor` keeps alive for seconds) and then a 雷 orb turns it into 感电 — on the server,
+   * by `damagePlayer` → `AuraState.apply` → `resolveReaction`, with no client involvement at all.
+   * The wait ends when **both** halves are in hand: a reaction has been latched, and the wire has
+   * an aura on the player *right now*, because the pixel work below needs a live attachment to
+   * freeze on. The two are independent — the reaction consumes what it reacted with — so this
+   * polls for the pair rather than for either one.
+   */
   const deadline = Date.now() + 300000;
-  let frozen = null, last = 0, ate = [], lastAte = 0;
+  let frozen = null, last = 0;
   for (;;) {
     const st = await state();
     // Alive is part of the freeze condition, not a separate check after it: a downed character is
@@ -692,13 +712,10 @@ try {
       break;
     }
     if (Date.now() > deadline) break;
-    if (st.maxHp && st.hp < st.maxHp * 0.55 && Date.now() - lastAte > 2500) {
-      lastAte = Date.now();
-      const dish = await eat();
-      if (dish) ate.push(dish);
-      console.log(`  (hp ${st.hp}/${st.maxHp} — ate ${dish || 'nothing: the pantry is empty'})`);
+    if (!(await keepAlive())) {
+      console.log('  (the party was downed while standing in the camp)');
+      break;
     }
-    if (!st.alive) { console.log('  (the party was downed while standing in the camp)'); break; }
     if (Date.now() - last > 12000) {
       last = Date.now();
       console.log(`  (waiting: ${st.wire} payload(s), aura ${JSON.stringify(st.au)}, reaction`
@@ -711,7 +728,7 @@ try {
       if (now && now.d > 5) {
         console.log(`  (closing on ${now.name} @${now.d}m — ${elOf(now) || 'physical'}`
           + `${st.au ? ` against the ${st.au} already attached` : ''})`);
-        await approach(now.id, 2.4, 20000, 0.9);
+        await approach(now.id, 2.4, 20000, 0.9, keepAlive);
       }
     }
     await sleep(500);
@@ -745,9 +762,17 @@ try {
     auLog.some((r) => r.au === null && r.was !== null) || auLog.some((r) => r.au === null),
     `${auLog.filter((r) => r.au === null).length} transition(s) back to nothing`);
 
+  // Two halves, and the message has to say which one gave way. It used to print `hit.d.reaction`
+  // alone, so the run where the camp reacted perfectly and then *killed the fixture before it
+  // could be photographed* reported the single word `electroCharged` — which reads as "the wrong
+  // reaction" and says nothing about the corpse. That cost a suite run: the 感电 dot was stacking
+  // one instance per application (`elements.js`), draining 6.09 %/s of max hp instead of the
+  // authored 2.10 %/s, and this line was the only witness.
+  const st = await state();
   if (!check('the simulation computed a reaction on the player itself', !!frozen && !!hit,
-    hit ? `${hit.d.reaction}` : `no reaction in ${(await state()).wire} payload(s)`
-      + ' — the camp never landed its second element')) {
+    `${hit ? `reaction ${hit.d.reaction}` : `no reaction in ${st.wire} payload(s)`
+      + ' — the camp never landed its second element'}, ${frozen ? 'froze' : 'never froze'}`
+    + ` (hp ${st.hp}/${st.maxHp}, alive ${st.alive}, ate ${ate.length ? ate.join('+') : 'nothing'})`)) {
     throw new Error('no player-side reaction to photograph');
   }
   const au = frozen.aura;
