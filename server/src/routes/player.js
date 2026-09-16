@@ -186,17 +186,34 @@ export default async function playerRoutes(app) {
       if (c.weapon?.uid) taken.add(c.weapon.uid);
       for (const a of Object.values(c.artifacts || {})) taken.add(a.uid);
     }
+    // Taking a slot means letting go of what was in it. `/api/char/equip` above does this on the
+    // manual path; forgetting it here left rows that claimed an owner nobody was wearing them
+    // for — two five-slot characters reported fourteen equipped pieces — and `equippedBy` is a
+    // refusal in five places (bulk salvage, enhancement fodder, the bag's 装备中 badge and its
+    // two pickers). The spare became a piece the player could neither wear nor spend.
+    const release = async (uid, keep) => {
+      if (!uid || uid === keep) return;
+      const row = p.equipment.find((e) => e.uid === uid);
+      if (row) row.equippedBy = null;
+      await repo.setEquippedBy(p.playerId, uid, null);
+    };
     // Weapon: highest rarity+level matching type.
     const wType = CHARACTERS[charId].weapon;
     const weapons = p.equipment.filter((e) => e.kind === 'weapon' && !taken.has(e.uid) && WEAPONS[e.weaponId]?.type === wType);
     weapons.sort((a, b) => (WEAPONS[b.weaponId].rarity - WEAPONS[a.weaponId].rarity) || (b.level - a.level));
-    if (weapons[0]) { inst.weapon = weapons[0]; weapons[0].equippedBy = charId; await repo.setEquippedBy(p.playerId, weapons[0].uid, charId); }
+    if (weapons[0]) {
+      await release(inst.weapon?.uid, weapons[0].uid);
+      inst.weapon = weapons[0]; weapons[0].equippedBy = charId; await repo.setEquippedBy(p.playerId, weapons[0].uid, charId);
+    }
     // Artifacts: highest level per slot.
     const arts = { ...inst.artifacts };
     for (const slot of ARTIFACT_SLOTS) {
       const pool = p.equipment.filter((e) => e.kind === 'artifact' && e.slot === slot && !taken.has(e.uid));
       pool.sort((a, b) => (b.rarity - a.rarity) || (b.level - a.level));
-      if (pool[0]) { arts[slot] = pool[0]; pool[0].equippedBy = charId; await repo.setEquippedBy(p.playerId, pool[0].uid, charId); }
+      if (pool[0]) {
+        await release(arts[slot]?.uid, pool[0].uid);
+        arts[slot] = pool[0]; pool[0].equippedBy = charId; await repo.setEquippedBy(p.playerId, pool[0].uid, charId);
+      }
     }
     inst.artifacts = arts;
     await repo.upsertCharacter(p.playerId, inst);

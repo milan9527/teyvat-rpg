@@ -4,6 +4,7 @@ import { q, one, many, tx } from './pg.js';
 import { redis, RK, invalidate } from './redis.js';
 import { STARTER_PARTY, CHARACTERS, MAX_CONSTELLATION } from '@teyvat/shared/data/characters.js';
 import { makeWeapon, generateArtifact } from '@teyvat/shared/sim/loot.js';
+import { ARTIFACT_SLOTS } from '@teyvat/shared/data/items.js';
 import { DAILY_IDS } from '@teyvat/shared/data/quests.js';
 import { welcomeMail, MAIL_TTL_DAYS } from '@teyvat/shared/data/mail.js';
 import { explorationSummary } from '@teyvat/shared/data/exploration.js';
@@ -949,10 +950,21 @@ export async function removeFriend(playerId, otherId) {
   return r.rowCount > 0;
 }
 
+/**
+ * The welcome kit: one artifact per slot, cycling, rather than `count` dice rolls.
+ *
+ * A five-piece kit is five because there are five slots. Rolling the slot as well is what a
+ * *domain drop* does, and doing it here handed real accounts things like three circlets and two
+ * flowers — three empty slots, and two pieces the starting two-character roster cannot both wear
+ * because they compete for the same one. The stats are still rolled (set, main stat, subs,
+ * level); only the slot is dealt out. `generateArtifact` has taken a `forceSlot` since it was
+ * written and nothing had ever passed one.
+ */
 export async function grantStarterArtifacts(playerId, count = 5) {
   const arts = [];
   for (let i = 0; i < count; i++) {
-    const a = generateArtifact(1, Math.floor(Math.random() * 1e9), 4);
+    const a = generateArtifact(1, Math.floor(Math.random() * 1e9), 4, null,
+      ARTIFACT_SLOTS[i % ARTIFACT_SLOTS.length]);
     arts.push(a);
     await addEquipment(playerId, a);
   }

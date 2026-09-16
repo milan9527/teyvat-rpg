@@ -36,7 +36,7 @@ import {
 import { SCATTER_KINDS, SINGLE_KINDS } from '../client/src/gfx/props.js';
 import { RECIPES } from '../shared/src/data/recipes.js';
 import { ENEMIES, ATTACK_MOVES } from '../shared/src/data/enemies.js';
-import { ARTIFACT_MAIN_STATS, WEAPONS, MATERIALS } from '../shared/src/data/items.js';
+import { ARTIFACT_MAIN_STATS, ARTIFACT_SLOTS, WEAPONS, MATERIALS } from '../shared/src/data/items.js';
 import { CHARACTERS } from '../shared/src/data/characters.js';
 import {
   artifactFodderXp, ARTIFACT_LEVEL_CAP, ARTIFACT_MORA_PER_XP,
@@ -136,6 +136,19 @@ check('starter inventory', p0.inventory.adventurerXp === 10 && p0.inventory.swee
   `xp ${p0.inventory.adventurerXp} food ${p0.inventory.sweetMadame}`);
 check('both starters hold a weapon',
   p0.equipment.filter((e) => e.kind === 'weapon' && e.equippedBy).length === 2);
+// The welcome kit is one piece per slot, not five dice rolls. It used to roll the slot too, and
+// an account could open on three circlets and two flowers: three slots it could not fill and two
+// pieces its two characters could not both wear. The stats are still random — only the slot is
+// dealt — so this asks for coverage, not for a fixed piece.
+const kit = p0.equipment.filter((e) => e.kind === 'artifact');
+const kitSlots = kit.map((e) => e.slot).sort();
+check('the welcome kit covers every artifact slot once',
+  kit.length === ARTIFACT_SLOTS.length
+  && kitSlots.join(',') === [...ARTIFACT_SLOTS].sort().join(','),
+  `${kit.length} pieces: ${kitSlots.join(' ')}`);
+check('...and each of them still rolled its own stats',
+  new Set(kit.map((e) => `${e.setId}/${e.main.key}/${e.level}`)).size > 1,
+  kit.map((e) => `${e.slot}:${e.setId}@${e.level}`).join(' '));
 // Derived stats are computed server-side from level, weapon and artifacts; a character
 // with zero attack means the stat pipeline silently produced nothing.
 const stats = st.b.stats || {};

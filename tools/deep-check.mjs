@@ -55,10 +55,14 @@ import { DISORDERS, disorderInfo } from '../shared/src/data/disorders.js';
 import { ENEMIES, ATTACK_MOVES, attackShape } from '../shared/src/data/enemies.js';
 import { CHARACTERS } from '../shared/src/data/characters.js';
 import { maxPortions } from '../shared/src/data/recipes.js';
+import { ARTIFACT_SLOTS } from '../shared/src/data/items.js';
 import { enemyStatAtLevel } from '../shared/src/sim/formulas.js';
 
 const HOST = process.argv[2] || '127.0.0.1:8787';
 const DUNGEON = 'abyssTrial';
+// Where the party shops for the artifacts the welcome kit does not cover — deliberately not the
+// dungeon under test, so nothing this probe asserts about `abyssTrial`'s save is self-inflicted.
+const FARM = 'frostCavern';
 const FIRST = Number(process.argv[3] || 1);
 const LAST = Number(process.argv[4] || 8);
 // AR 35 is the operating point, not a round number: `arCap(35) = 90` (the character cap) while
@@ -149,10 +153,42 @@ async function arm(acc) {
   for (const w of (mid.equipment || []).filter((e) => e.kind === 'weapon')) {
     await rest(acc.token, '/api/inventory/weapon/levelup', { uid: w.uid, ore: { ironChunk: 999999 } });
   }
-  for (const charId of Object.keys(mid.characters || {})) {
-    await rest(acc.token, '/api/char/autoequip', { charId });
-  }
+  await dress(acc);
   return kitchen(acc);
+}
+
+/**
+ * Dress the whole party, not just whoever `autoequip` was called for first.
+ *
+ * The welcome kit is five artifacts — one per slot — and `autoequip` hands a character the best
+ * piece per slot that nobody else is already wearing. So the first character it runs for takes
+ * all five and the second one walks into a level-99 floor in nothing: base 5 % crit against
+ * lyra's 29 %, and the probe's own `bestCharFor` puts it in whenever the target resists the
+ * other element. Artifacts come from domains, so the party buys the rest from the two dungeons
+ * that are *not* under test — the product's own claim route, at the product's own 20 resin,
+ * leaving the `abyssTrial` save this probe asserts on untouched.
+ */
+async function dress(acc) {
+  let bought = 0;
+  for (let round = 0; round < 10; round++) {
+    const before = (await rest(acc.token, '/api/player/state')).b.player || {};
+    for (const charId of Object.keys(before.characters || {})) {
+      await rest(acc.token, '/api/char/autoequip', { charId });
+    }
+    const after = (await rest(acc.token, '/api/player/state')).b.player || {};
+    const short = Object.values(after.characters || {})
+      .filter((c) => Object.keys(c.artifacts || {}).length < ARTIFACT_SLOTS.length).length;
+    if (!short) break;
+    // The bar is a clock and this is a probe, so rewind it rather than mint anything: the claim
+    // still pays its own resin out of a bar that regenerated at the authored rate.
+    await rest(acc.token, '/api/dev/resin-rewind', { seconds: 7 * 24 * 3600 });
+    for (let i = 0; i < 5; i++) {
+      const r = await rest(acc.token, '/api/world/chamber', { zone: FARM, floor: 1, time: 1 });
+      if (r.status !== 200 || r.b?.error) break;
+      bought += (r.b.drops?.artifacts || []).length;
+    }
+  }
+  return bought;
 }
 
 /**
@@ -184,6 +220,10 @@ async function kitchen(acc) {
     maxLevel: Math.max(0, ...Object.values(fin.characters || {}).map((v) => v.level || 0)),
     weapons: (fin.equipment || []).filter((e) => e.kind === 'weapon').map((e) => e.level),
     arts: (fin.equipment || []).filter((e) => e.kind === 'artifact' && e.equippedBy).length,
+    // Per character, because the total says nothing about who is wearing it: five pieces is a
+    // dressed main and a naked swap partner just as easily as it is two half-dressed characters.
+    worn: Object.entries(fin.characters || {})
+      .map(([id, c]) => `${id}:${Object.keys(c.artifacts || {}).length}`),
     food: ['sweetMadame', 'northernStew', 'mintJelly', 'reviveDish']
       .reduce((s, i) => s + (fin.inventory?.[i] || 0), 0),
     bag: fin.inventory || {},
@@ -291,8 +331,16 @@ function fightTick(c, opts = {}) {
     c.send(C2S.USE_ITEM, { itemId: 'mintJelly' });
   }
 
-  const live = (s.enemies || []).filter((e) => e.a === 1);
-  if (!live.length) return;
+  const all = (s.enemies || []).filter((e) => e.a === 1);
+  if (!all.length) return;
+  // Killing a summon advances nothing. A chamber owns exactly the ids its own wave spawned
+  // (`_spawnWave` sets `c.ids`), and `abyssHerald`'s `summonMinions` drops three more bodies in
+  // the arena every few moves with no cap — so "attack the nearest live enemy" spends a boss
+  // floor on slimes while the thing the clock is waiting for stands untouched. A player ignores
+  // them; told which types the wave asked for, so does this. Everything else — the dodge, the
+  // element pick — still sees every enemy in the arena.
+  const owned = opts.wanted ? all.filter((e) => opts.wanted.has(e.t)) : all;
+  const live = owned.length ? owned : all;
   const target = live.map((e) => ({ ...e, d: Math.hypot(e.x - me.x, e.z - me.z) }))
     .sort((p, q) => p.d - q.d)[0];
 
@@ -339,6 +387,8 @@ function fightTick(c, opts = {}) {
     const step = Math.min(3.0, d - REACH * 0.8);
     move(c, me, me.x + dir[0] * step, me.z + dir[2] * step, Math.atan2(dir[0], dir[2]));
   }
+  c.stat.swings++;
+  if (d <= REACH) c.stat.inReach++;
   c.send(C2S.ATTACK, { dir });
   if (now - (c._skillAt || 0) > 1200) { c._skillAt = now; c.send(C2S.SKILL, { dir }); }
   if ((me.en || 0) >= (CHARACTERS[me.c]?.burst?.cost ?? 60)) c.send(C2S.BURST, { dir });
@@ -360,11 +410,26 @@ console.log(`B ${b.playerId} ${armB.chars} weapons ${armB.weapons} arts ${armB.a
 // The whole probe is downstream of this: a party that is not armed measures the arming, not the
 // dungeon. It is an assertion rather than a precondition because every step of it is a product
 // route — a broken `/api/char/ascend` has to be able to turn this red.
-const armedOk = [armA, armB].every((k) => k.maxLevel >= 89 && k.arts >= 4 && k.food > 0
+// `worn`, not `arts`: every character on the field wears a full set, so the fight below is not
+// quietly decided by which of the two `autoequip` reached first.
+const armedOk = [armA, armB].every((k) => k.maxLevel >= 89 && k.food > 0
+  && k.worn.length >= 2 && k.worn.every((w) => Number(w.split(':')[1]) === 5)
   && Math.min(...k.weapons) >= 70 && k.rank === RANK && k.worldLevel === 6);
 ok('two guests reach level 90 with gear and food through the real growth routes', armedOk,
-  `A lv${armA.maxLevel}/w${armA.weapons}/a${armA.arts}/f${armA.food} `
-  + `B lv${armB.maxLevel}/w${armB.weapons}/a${armB.arts}/f${armB.food}`);
+  `A lv${armA.maxLevel}/w${armA.weapons}/${armA.worn.join('+')}/f${armA.food} `
+  + `B lv${armB.maxLevel}/w${armB.weapons}/${armB.worn.join('+')}/f${armB.food}`);
+
+// And the bookkeeping behind it. `autoequip` used to set `equippedBy` on the piece it put on
+// without clearing it on the piece it took off, so an account that had auto-equipped twice
+// carried rows claiming an owner who was wearing something else — fourteen "equipped" pieces
+// across two five-slot characters. `equippedBy` is a refusal in five places (bulk salvage,
+// enhancement fodder, the bag's 装备中 badge and its two pickers), so each stale row was a piece
+// the player could neither wear nor spend.
+for (const [tag, k] of [['A', armA], ['B', armB]]) {
+  const on = k.worn.reduce((s, w) => s + Number(w.split(':')[1]), 0);
+  ok(`${tag}: every artifact that claims an owner is being worn by them`, k.arts === on,
+    `${k.arts} rows say equipped, ${on} are on a character (${k.worn.join(' ')})`);
+}
 
 await rest(a.token, '/api/social/request', { playerId: b.playerId });
 await rest(b.token, '/api/social/accept', { playerId: a.playerId });
@@ -394,7 +459,10 @@ await sleep(1200);
 const clients = [ca, cb];
 for (const c of clients) c.stat = {};
 const resetStats = () => clients.forEach((c) => {
-  c.stat = { deaths: 0, rescues: 0, heals: 0, buffs: 0, dodges: 0, swaps: 0 };
+  // `swings` is every ATTACK sent, `inReach` the ones sent from close enough for the server's
+  // own `attackShape` to be able to touch the target: the difference is time the party spent
+  // walking, and a probe that only counts swings cannot tell a slow floor from a distant one.
+  c.stat = { deaths: 0, rescues: 0, heals: 0, buffs: 0, dodges: 0, swaps: 0, swings: 0, inReach: 0 };
   c._danger = new Map(); c._buffAt = 0;
 });
 
@@ -438,7 +506,22 @@ async function playFloor(floor, opts = {}) {
   // only the first one is about the arriving shield — see the assertion.
   let bossShieldMin = Infinity;
   let held = 0;
+  // A floor's real cost is how many bodies had to be put down, not how much health the roster
+  // authored: a summoner adds to the count while the fight runs, and nothing else in the probe
+  // would ever notice.
+  const census = new Map();        // enemy type -> how many distinct ids of it were ever alive
+  const seenIds = new Set();
+  let peakLive = 0;
   const done = () => ca.got(S2C.CHAMBER).slice(nA).find((m) => m.state === 'cleared' || m.state === 'failed');
+
+  // `fightTick` sends one ATTACK per pass, so the loop's *period* is the party's DPS — and
+  // `await sleep(TICK)` at the bottom of a body makes the period `TICK + however long the body
+  // took`. Standalone the body costs ~20 ms; under the full suite it cost more, and every floor
+  // ran 16–32 % slower for it (floor 6: 220.2 s alone, 262.2 s in the suite, across a 255 s 1★
+  // bar). So the tick is scheduled against a deadline instead: the cadence is wall-clock, and if
+  // the body ever outruns it the lateness is reported rather than silently stretching the fight.
+  const TICK = 180;
+  let due = Date.now(), ticks = 0, late = 0, lateMs = 0;
 
   while (!done() && Date.now() - t0 < (def.timeLimit + 60) * 1000) {
     const s = snap(ca);
@@ -448,8 +531,11 @@ async function playFloor(floor, opts = {}) {
     const mine = sc && sc.floor === floor && sc.state === 'running';
     const elapsed = mine ? def.timeLimit - sc.timeLeft : 0;
     if (mine) {
+      let live = 0;
       for (const e of s.enemies || []) {
         if (e.a !== 1) continue;
+        live++;
+        if (!seenIds.has(e.id)) { seenIds.add(e.id); census.set(e.t, (census.get(e.t) || 0) + 1); }
         if (sc.wave === 1 && !firstWave.has(e.id)) firstWave.set(e.id, e);
         if (!ENEMIES[e.t]?.boss) continue;
         boss = e;
@@ -460,15 +546,35 @@ async function playFloor(floor, opts = {}) {
         }
         if (e.st === 'stagger') staggers.push({ at: +elapsed.toFixed(1), ph: e.ph });
       }
+      peakLive = Math.max(peakLive, live);
     }
     // The stall: hold only when the last wave is down to its last enemy, so the clock runs
     // with the floor genuinely unfinished rather than with a wave still walking in.
     const hold = !!opts.holdUntil && mine && sc.wave === sc.waves && sc.remaining === 1
       && elapsed < opts.holdUntil;
     if (hold) held++;
-    for (const c of clients) fightTick(c, { hold });
-    await sleep(180);
+    // The roster the *current* wave asked for, by type — the snapshot names no owner, and a
+    // wave only starts once the one before it is dead, so the type list is unambiguous.
+    const wanted = mine ? new Set(def.waves[Math.max(0, sc.wave - 1)] || []) : null;
+    for (const c of clients) fightTick(c, { hold, wanted });
+    ticks++;
+    due += TICK;
+    const wait = due - Date.now();
+    if (wait < 0) { late++; lateMs -= wait; due = Date.now(); }
+    await sleep(Math.max(0, wait));
   }
+  const secs = (Date.now() - t0) / 1000;
+  const tick = { ticks, late, lateMs, hz: +(ticks / Math.max(0.001, secs)).toFixed(2) };
+  const authored = def.waves.reduce((n, w) => n + w.length, 0);
+  const roster = { authored, seen: seenIds.size, peakLive, census: [...census] };
+  // What the swings were worth. A floor's clear time is `health / damage per second`, and when
+  // the time is the thing under test the only way to tell a tanky floor from a probe that spent
+  // the fight out of range is to price both halves.
+  const hits = ca.got(S2C.DAMAGE).slice(nDmg).filter((d) => d.by && d.target === 'enemy');
+  const dealt = hits.reduce((s, d) => s + (d.amount || 0), 0);
+  const onBoss = boss ? hits.filter((d) => d.id === boss.id).reduce((s, d) => s + (d.amount || 0), 0) : 0;
+  const damage = { hits: hits.length, dealt: Math.round(dealt), onBoss: Math.round(onBoss),
+    dps: Math.round(dealt / Math.max(0.001, secs)) };
   const end = done();
   const rwA = await waitAfter(ca, S2C.CHAMBER, nA, (m) => m.state === 'reward', 9000);
   const rwB = await waitAfter(cb, S2C.CHAMBER, nB, (m) => m.state === 'reward', 9000);
@@ -480,7 +586,7 @@ async function playFloor(floor, opts = {}) {
   );
   return {
     def, start, end, rwA, rwB, firstWave, phases, staggers, boss, bossShieldMax, bossShieldMin,
-    brokeShield,
+    brokeShield, tick, roster, damage,
     held, wl: [wlBefore, wlAfter], wall: (Date.now() - t0) / 1000,
   };
 }
@@ -492,6 +598,22 @@ function checkClear(r, prevStars, tag) {
   ok(`floor ${floor}${tag}: cleared`, end?.state === 'cleared',
     `${end?.state} time=${end?.time} wall=${r.wall.toFixed(0)}s boss=${r.boss ? `${r.boss.hp}/${r.boss.mhp}` : '—'}`);
   if (end?.state !== 'cleared') return null;
+
+  // The margin, always, whether it passed or not: this assertion is calibrated against how fast
+  // the probe fights, and the one number that says how close the calibration is running is the
+  // distance to the 1★ bar. Printed with the achieved tick rate beside it, because that is what
+  // moves it.
+  const bar = def.stars[0];
+  console.log(`     floor ${floor}${tag}: ${end.time}s of the ${bar}s 1★ bar`
+    + ` (${((1 - end.time / bar) * 100).toFixed(0)}% margin) at ${r.tick.hz}/s`
+    + (r.tick.late ? `, ${r.tick.late} of ${r.tick.ticks} ticks late by ${r.tick.lateMs} ms total` : ''));
+  console.log(`     floor ${floor}${tag}: ${r.roster.seen} enemies put down for ${r.roster.authored}`
+    + ` authored, at most ${r.roster.peakLive} at once —`
+    + ` ${r.roster.census.map(([t, n]) => `${t}×${n}`).join(' ')}`);
+  const sw = [ca, cb].map((c) => `${c.stat.inReach}/${c.stat.swings}`).join(' ');
+  console.log(`     floor ${floor}${tag}: ${r.damage.hits} hits landed for ${r.damage.dealt}`
+    + ` (${r.damage.dps}/s${r.damage.onBoss ? `, ${r.damage.onBoss} of it on the boss` : ''}),`
+    + ` swings in reach ${sw}`);
 
   const expectStars = chamberStars(def, end.time);
   ok(`floor ${floor}${tag}: ${end.stars}★ is what ${end.time}s is worth`,
@@ -682,16 +804,41 @@ for (const def of zdef.chambers.filter((c) => c.floor >= Math.max(2, FIRST) && c
   }
 
   checkClear(r, prev, '');
-  if (r.end?.state === 'cleared') {
-    starsByFloor.set(floor, r.end.stars);
+  const runs = [r];
+  // A clear can be worth no star, and a 0★ clear banks nothing — so it leaves the next floor
+  // locked exactly as a failure would (the rule itself is asserted at the top of this file). What
+  // a player does then is play the floor again, so the probe does too: once, only when it happens,
+  // and the retry's clear is the one the save and the walk are held to.
+  if (r.end?.state === 'cleared' && r.end.stars === 0) {
+    const rec0 = await record(a, floor);
+    ok(`floor ${floor}: a 0★ clear banks no star`, (rec0.stars || 0) === 0,
+      `record ${JSON.stringify(rec0)} after a ${r.end.time}s clear`);
+    console.log(`     floor ${floor}: ${r.end.time}s missed the ${def.stars[0]}s 1★ bar by `
+      + `${(r.end.time - def.stars[0]).toFixed(1)}s, so it is played again`);
+    const retry = await playFloor(floor);
+    if (!retry.start) {
+      ok(`floor ${floor}: the retry starts`, false, `no start event: ${JSON.stringify(retry.error)}`);
+      break;
+    }
+    runs.push(retry);
+    checkClear(retry, rec0.stars || 0, ' (retry)');
+  }
+  const last = runs[runs.length - 1];
+  const cleared = runs.filter((x) => x.end?.state === 'cleared').map((x) => x.end);
+  if (last.end?.state === 'cleared') {
+    starsByFloor.set(floor, last.end.stars);
     walked++; deepest = floor;
     const rec = await record(a, floor);
+    // The record keeps the best of the attempts, not the last one — the same rule floor 1 proves
+    // with a deliberate slow-then-fast pair.
     ok(`floor ${floor}: the clear is in the save`,
-      rec.stars === r.end.stars && rec.bestTime === r.end.time, JSON.stringify(rec));
+      rec.stars === Math.max(...cleared.map((e) => e.stars))
+      && rec.bestTime === Math.min(...cleared.map((e) => e.time)),
+      `${JSON.stringify(rec)} after ${cleared.map((e) => `${e.time}s ${e.stars}★`).join(' + ')}`);
   }
-  console.log(`     floor ${floor} ${def.disorder || '—'} ${r.end?.state} ${r.end?.time}s `
-    + `${r.end?.stars}★ A${JSON.stringify(ca.stat)} B${JSON.stringify(cb.stat)}`);
-  if (r.end?.state !== 'cleared') break;
+  console.log(`     floor ${floor} ${def.disorder || '—'} ${last.end?.state} ${last.end?.time}s `
+    + `${last.end?.stars}★ A${JSON.stringify(ca.stat)} B${JSON.stringify(cb.stat)}`);
+  if (last.end?.state !== 'cleared') break;
 }
 
 /* --- what the walk as a whole proves ------------------------------------------- */
