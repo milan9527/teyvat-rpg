@@ -38,8 +38,11 @@
 //    and no shadow) and the tier is re-checked after the zone change.
 import fs from 'node:fs';
 import puppeteer from 'puppeteer';
+import * as THREE from '../client/node_modules/three/build/three.module.js';
 import { CLIPS } from '../client/src/gfx/animator.js';
+import { ActorSystem, SPEED_TAU, smoothSpeed } from '../client/src/game/actors.js';
 import { ACTION } from '../shared/src/protocol.js';
+import { ENEMIES } from '../shared/src/data/enemies.js';
 import { decodePng, diffMask, largestBlob, pixelsDiffering } from './lib/png.mjs';
 
 const argv = process.argv.slice(2);
@@ -195,6 +198,290 @@ for (const key of ['sitting', 'aiming', 'climbing', 'gliding', 'swimming', 'grou
   const live = !!val && !/^(false|true|0|null|undefined)$/.test(val);
   check(`localPlayer varies '${key}' rather than pinning it`, live,
     val === null ? 'not passed at all' : `${key}: ${val}`);
+}
+
+/* ------------------------------- 1b. a remote actor's legs against its own ground -- */
+
+/**
+ * A teammate or a creature you did not simulate has **two clocks**, and this section is about
+ * making them agree.
+ *
+ * Its body comes out of `Socket.sampleWindow()`: a position interpolated between the two
+ * snapshots bracketing the render time, i.e. denominated in the *wall clock*. Its legs used to be
+ * advanced by `speed × dt` with the loop's `dt`, which `game.js` clamps to 50 ms so one long frame
+ * cannot throw the world — and a clamped dt is not a clock (see the respawn countdown that froze
+ * at 「8 秒后」). The two agree only above 20 fps. Below it the body covers ground the legs are
+ * never told about, and the model skates by construction.
+ *
+ * And `speed` itself was `speed * 0.7 + inst * 0.3` — a blend per *drawn frame*, which is a time
+ * constant of 47 ms at 60 fps and 933 ms at 3 fps. The same ghost running at a steady 6 m/s was
+ * drawn `sprint` on a fast client and `run` on every slower one, because on the slower one the
+ * smoother had not reached the speed yet on the frame the clip was picked.
+ *
+ * Both are measured here by driving the real `ActorSystem` against a synthetic 10 Hz stream, in
+ * node, with no browser: one player accelerating from rest to a fixed speed in a straight line and
+ * stopping. Nothing about the animator is written down below — the stride comes off the rig
+ * (`animator.ctx.gait.stride`), the clip a speed implies comes from `animator.autoLocomotion`, and
+ * the foot comes from `rig.bones.footL/R.matrixWorld`.
+ */
+const SNAP_MS = 100, LAG = 0.1;
+const RATES = [60, 30, 20, 12, 6];
+const ghostAt = (i, mps, run) => {
+  const d = Math.min(run, (i * SNAP_MS) / 1000) * mps;
+  return {
+    serverNow: i * SNAP_MS,
+    data: { players: [{ id: 7, x: 0, y: 0, z: d, ry: 0, hp: 1000, mhp: 1000, a: 0,
+      n: 'ghost', c: 'lyra', au: null, sh: 0, she: null, pt: null, al: 1 }] },
+  };
+};
+
+const remote = (fps, mps, run = 2) => {
+  const sys = new ActorSystem(new THREE.Scene(), null, null);
+  sys.setLocalId(1);
+  const dtReal = 1 / fps, dt = Math.min(0.05, dtReal);   // the clamp game.js applies
+  let ground = 0, px = null, pz = null, stride = 0, atSpeed = 0, moving = null, clip = null;
+  const feet = { footL: [], footR: [] };
+  for (let f = 0; f * dtReal < run + 0.3; f++) {
+    const t = f * dtReal, rt = Math.max(0, t - LAG);
+    const ia = Math.floor((rt * 1000) / SNAP_MS);
+    sys.update(dt, t, { a: ghostAt(ia, mps, run), b: ghostAt(ia + 1, mps, run),
+      u: ((rt * 1000) % SNAP_MS) / SNAP_MS });
+    const e = sys.players.get(7);
+    if (!e) continue;
+    if (px !== null) {
+      const step = Math.hypot(e.x - px, e.z - pz);
+      ground += step;
+      if (moving === null && step > 0.01) moving = e.actor.animator?.base;
+    }
+    px = e.x; pz = e.z;
+    // The stride this rig reaches at the true speed, read off the rig on a frame where the
+    // derived speed happens to be right — never written down here.
+    if (Math.abs(e.speed - mps) < 0.1) {
+      stride = e.actor.animator?.ctx?.gait?.stride || stride;
+      clip = e.actor.animator.base;
+      atSpeed = e.speed;
+    }
+    e.actor.group.updateMatrixWorld(true);
+    for (const foot of Object.keys(feet)) {
+      const el = e.actor.rig.bones[foot].matrixWorld.elements;
+      feet[foot].push({ world: el[14], model: el[14] - e.actor.group.position.z,
+        body: e.actor.group.position.z,
+        // Frames where the derived speed is the one the ghost is really running at. On those the
+        // clip, the amplitude and the stride are all pinned, so the *only* thing left that can
+        // move the foot within the model is the gait clock.
+        held: Math.abs(e.speed - mps) < 0.1 });
+    }
+  }
+  const held = feet.footL.filter((s) => s.held).map((s) => s.model);
+  // Stance = a run of frames over which the contact point travels *backwards through the model*,
+  // which is what a foot does while the body passes over it (boss-check detects it the same way).
+  // Taken over the most ground rather than the most frames: the longest run of frames in any trace
+  // is the one after the actor stops, where the legs cycle over no ground at all — a defect of its
+  // own, but not one a ratio whose denominator is zero can express.
+  let best = null;
+  for (const [foot, tr] of Object.entries(feet)) {
+    let cur = null;
+    const keep = (c) => {
+      if (!c) return;
+      const over = Math.abs(tr[c.to].body - tr[c.from].body);
+      if (over < 0.3 || (best && over <= best.over)) return;
+      best = { foot, frames: c.to - c.from, over,
+        slid: Math.abs(tr[c.to].world - tr[c.from].world) / over };
+    };
+    for (let i = 1; i < tr.length; i++) {
+      if (tr[i].model < tr[i - 1].model) cur = cur ? { from: cur.from, to: i } : { from: i - 1, to: i };
+      else { keep(cur); cur = null; }
+    }
+    keep(cur);
+  }
+  const e = sys.players.get(7);
+  return { fps, mps, ground, stride, atSpeed, clip, moving, stance: best,
+    // How far the foot travelled inside the model over the pinned-speed frames, and how many
+    // there were. Zero over several frames means the pose never changed.
+    poseSpread: held.length > 2 ? Math.max(...held) - Math.min(...held) : null, heldFrames: held.length,
+    cycles: e.actor.animator.basePhase, speed: e.speed,
+    // Which clip that speed implies, asked of the animator instead of restated here.
+    band: e.actor.animator.autoLocomotion({ speed: mps, grounded: true }),
+    // Frames per gait cycle: the resolution this trace was sampled at. A stance is about a third
+    // of a cycle, so below ~4 samples per cycle there is no stance left to measure.
+    perCycle: (stride / mps) * fps };
+};
+
+// The smoother's own arithmetic first, because everything below is measured through it: the new
+// time constant has to reproduce the pair it replaces at the frame rate that pair was authored
+// against, or this is a re-tuning wearing a bug fix's clothes.
+check('the derived-speed smoother is the old 0.7/0.3 blend at 60 fps, to the last bit',
+  Math.abs(smoothSpeed(0, 1, 1 / 60) - 0.3) < 1e-15 && Math.abs(SPEED_TAU - 0.0467) < 1e-4,
+  `τ ${SPEED_TAU.toFixed(6)} s → k ${smoothSpeed(0, 1, 1 / 60)} at dt = 1/60,`
+  + ` ${smoothSpeed(0, 1, 1 / 6).toFixed(3)} at dt = 1/6 (the old blend spent 0.3 either way)`);
+
+const SPRINT = 6;
+const runs = RATES.map((fps) => remote(fps, SPRINT));
+for (const r of runs) {
+  console.log(`  (fps ${String(r.fps).padStart(2)}: ${r.cycles.toFixed(2)} cycle(s) over`
+    + ` ${r.ground.toFixed(2)} m, stride ${r.stride.toFixed(2)} m, first moving frame '${r.moving}',`
+    + ` ${r.perCycle.toFixed(1)} frames per cycle)`);
+}
+// A precondition, not a claim: the stride below is read off the rig on a frame where the derived
+// speed is right, so a rate that never reached the speed has no denominator and every percentage
+// after it would be arithmetic about zero.
+check('every frame rate derived the speed the ghost was actually moving at',
+  runs.every((r) => r.stride > 0),
+  runs.map((r) => `${r.fps}: stride ${r.stride.toFixed(2)} m, read on a frame where the`
+    + ` derived speed was ${r.atSpeed.toFixed(2)} m/s`).join('; '));
+// Cycles per metre, against the stride the rig itself reaches at that speed. Not a tautology: the
+// left side is the animator's own odometer (`basePhase`, in cycles), the right side is the ground
+// the *body* was interpolated across divided by the rig's measured stride. The band is wide on
+// purpose — the trace includes the ramp up and down, where a shorter stride buys more cycles per
+// metre honestly — and the claim that actually bites is the spread below it.
+for (const r of runs) {
+  const want = r.ground / r.stride;
+  check(`at ${r.fps} fps the legs cycle once per stride of ground covered`,
+    r.stride > 0 && r.cycles / want > 0.85 && r.cycles / want < 1.2,
+    `${r.cycles.toFixed(2)} cycles against ${want.toFixed(2)} (${(r.cycles / want * 100).toFixed(0)}%)`);
+}
+const ratios = runs.map((r) => r.cycles / (r.ground / r.stride));
+const spread = Math.max(...ratios) / Math.min(...ratios);
+check('...and the same walk costs the same number of steps whatever frame rate is watching',
+  spread < 1.08,
+  `${ratios.map((v, i) => `${RATES[i]}: ${(v * 100).toFixed(0)}%`).join(', ')}`
+  + ` — a spread of ${((spread - 1) * 100).toFixed(0)}%`);
+// Which clip is not a matter of taste: `autoLocomotion` picks it from the speed, so the same
+// teammate must be drawn in the same clip on the first frame they move at every frame rate.
+check(`a teammate moving at ${SPRINT} m/s is drawn in the '${runs[0].band}' clip on the first frame`
+  + ' they move, at every frame rate',
+  runs.every((r) => r.moving === r.band),
+  runs.map((r) => `${r.fps}: ${r.moving}`).join(', '));
+
+// The planted foot itself, on the clip most of the world is watched at (a teammate crossing camp
+// at 1.5 m/s walks). `gait-check` holds a *local* walker to 4 % of the ground; a remote one is
+// interpolated between snapshots on top of that, so the bar here is looser — but only where the
+// stance is sampled often enough to exist. At 6 fps a sprint cycle lasts 3 frames: the two
+// endpoints of a "stance" that short are half a swing apart and the ratio measures aliasing, not
+// sliding, which is why this reports its own resolution and skips instead of guessing.
+for (const mps of [1.5, 3.5]) {
+  for (const fps of RATES) {
+    const r = remote(fps, mps);
+    const name = `the planted foot holds the ground at ${mps} m/s, ${fps} fps`;
+    if (!r.stance) { skipped(name, 'no stance covered enough ground to measure'); continue; }
+    if (r.stance.frames < 5) {
+      skipped(name, `the longest stance was ${r.stance.frames} frame(s) of a`
+        + ` ${r.perCycle.toFixed(1)}-frame cycle — too coarse to tell a slide from an alias`);
+      continue;
+    }
+    check(name, r.stance.slid < 0.15,
+      `${r.stance.foot} slid ${(r.stance.slid * 100).toFixed(0)}% of the ${r.stance.over.toFixed(2)} m`
+      + ` the body covered over ${r.stance.frames} frame(s) of stance`);
+  }
+}
+
+// A creature's legs are a *different* odometer: `gfx/enemies.js` integrates its own gait clock in
+// radians from a stride it measured off the rig, and it never went through `Animator` at all. Same
+// two clocks, same fix, so the same reading — on the creature's own authored speed, which is what
+// it chases you at. (`gait-check` holds the same models to 4 % as *local* walkers at 60 fps; the
+// point here is only that the network path does not add a slide of its own.)
+const CREATURE = 'hilichurl';
+const beast = (fps, run = 2.4) => {
+  const mps = ENEMIES[CREATURE].speed;
+  const sys = new ActorSystem(new THREE.Scene(), null, null);
+  const dtReal = 1 / fps, dt = Math.min(0.05, dtReal);
+  const snap = (i) => ({
+    serverNow: i * SNAP_MS,
+    data: { enemies: [{ id: 11, t: CREATURE, x: 0, y: 0, z: Math.min(run, (i * SNAP_MS) / 1000) * mps,
+      ry: 0, hp: 500, mhp: 500, lv: 20, sh: 0, shm: 0, au: null, fz: 0, a: 1, ph: 1, st: 'chase',
+      mv: null }] },
+  });
+  const tr = [];
+  let peak = 0;
+  for (let f = 0; f * dtReal < run + 0.3; f++) {
+    const t = f * dtReal, rt = Math.max(0, t - LAG);
+    const ia = Math.floor((rt * 1000) / SNAP_MS);
+    sys.update(dt, t, { a: snap(ia), b: snap(ia + 1), u: ((rt * 1000) % SNAP_MS) / SNAP_MS });
+    const e = sys.enemies.get(11);
+    if (!e) continue;
+    peak = Math.max(peak, e.speed);
+    e.actor.group.updateMatrixWorld(true);
+    const el = e.actor.view.bones.footL.matrixWorld.elements;
+    tr.push({ world: el[14], model: el[14] - e.actor.group.position.z, body: e.actor.group.position.z,
+      held: Math.abs(e.speed - mps) < 0.1,
+      // The rig's own divisor at this speed, asked of the model rather than restated here.
+      stride: e.actor.view.strideAt?.(e.speed) ?? 0 });
+  }
+  const held = tr.filter((s) => s.held);
+  let best = null, cur = null;
+  const keep = (c) => {
+    if (!c) return;
+    const over = Math.abs(tr[c.to].body - tr[c.from].body);
+    if (over < 0.3 || (best && over <= best.over)) return;
+    best = { frames: c.to - c.from, over, slid: Math.abs(tr[c.to].world - tr[c.from].world) / over };
+  };
+  for (let i = 1; i < tr.length; i++) {
+    if (tr[i].model < tr[i - 1].model) cur = cur ? { from: cur.from, to: i } : { from: i - 1, to: i };
+    else { keep(cur); cur = null; }
+  }
+  keep(cur);
+  return { fps, mps, peak, stance: best,
+    stride: held.length ? held[held.length - 1].stride : 0,
+    poseSpread: held.length > 2
+      ? Math.max(...held.map((s) => s.model)) - Math.min(...held.map((s) => s.model)) : null,
+    heldFrames: held.length };
+};
+for (const fps of RATES) {
+  const r = beast(fps);
+  const name = `a ${CREATURE} chasing at ${r.mps} m/s keeps its foot on the ground, ${fps} fps`;
+  if (!r.stance) { skipped(name, 'no stance covered enough ground to measure'); continue; }
+  if (r.stance.frames < 5) {
+    skipped(name, `the longest stance was ${r.stance.frames} frame(s) — too coarse to tell a`
+      + ` slide from an alias (the creature covers ${(r.mps / fps).toFixed(2)} m per frame)`);
+    continue;
+  }
+  check(name, r.stance.slid < 0.2,
+    `the foot slid ${(r.stance.slid * 100).toFixed(0)}% of the ${r.stance.over.toFixed(2)} m the body`
+    + ` covered over ${r.stance.frames} frame(s) of stance, at a derived ${r.peak.toFixed(2)} m/s`);
+}
+
+// A frame that covers more ground than one stride. Feeding the odometer the ground covered came
+// with a cap — `min(advance, stride)` — to keep a teleport from being walked through, and one
+// stride is exactly one *cycle*: on every frame whose ground reached the stride the phase turned a
+// whole revolution and the pose came out bit-identical, so the legs froze mid-stride while the body
+// slid. It is the very defect this path exists to fix, put back at low frame rates only, and no
+// assertion above could see it (at 6 fps a sprint still covers 1.0 m against a 1.8 m stride).
+// A live chase at llvmpipe's ~3 fps measured 0.0000 rad of thigh spread over 15 walking frames.
+//
+// Read on the frames where the derived speed is pinned to the ghost's own, so the clip, the swing
+// amplitude and the stride are all constant and the clock is the only thing left that can move the
+// foot inside the model. The precondition is the rig's own stride against the ground per frame:
+// where the frame is shorter than a stride there is nothing to cap and the gate would be vacuous.
+// The frame rates are low because that is what it takes to outrun a *sprint* stride (3.2 m) — but
+// the frame rate is only the vehicle. A stream that stalls for a second and resyncs hands the same
+// oversized step to a body drawn at 60 fps.
+// Against a control, not against zero: the reading is the excursion of the same foot in the same
+// model at the same speed, sampled finely at 60 fps, which is the whole travel a gait cycle has to
+// offer. A bare "it moved a bit" bar would have passed the clamp — at 1 fps the clamped phase turns
+// 1.00 ± the wobble in a stride read at a speed pinned to 0.1 m/s, and that wobble alone moved the
+// foot 0.19 m of its 0.86 m travel.
+const longStep = (who, r, perFrame, ref) => {
+  const name = `${who} covering ${perFrame.toFixed(2)} m in one frame — more than a whole stride —`
+    + ' is not left frozen mid-stride';
+  if (r.poseSpread == null || !(r.stride > 0) || !(ref > 0.1)) {
+    skipped(name, `at ${r.fps} fps the derived speed held for ${r.heldFrames} frame(s), too few to`
+      + ` read a pose from (the 60 fps control travels ${ref?.toFixed?.(3) ?? '?'} m)`);
+  } else if (perFrame < r.stride) {
+    skipped(name, `at ${r.fps} fps a frame covers ${perFrame.toFixed(2)} m, inside the`
+      + ` ${r.stride.toFixed(2)} m stride — nothing for a cap to clamp`);
+  } else {
+    const frac = r.poseSpread / ref;
+    check(name, frac > 0.5,
+      `the foot moved ${r.poseSpread.toFixed(3)} m inside the model over ${r.heldFrames} such frames`
+      + ` at ${r.fps} fps — ${(frac * 100).toFixed(0)}% of the ${ref.toFixed(3)} m it travels at`
+      + ` 60 fps, against a ${r.stride.toFixed(2)} m stride`);
+  }
+};
+const refPlayer = remote(60, SPRINT, 6).poseSpread;
+for (const fps of [1.5, 1]) longStep('a teammate', remote(fps, SPRINT, 6), SPRINT / fps, refPlayer);
+const refBeast = beast(60, 4).poseSpread;
+for (const fps of [3, 2]) {
+  longStep(`a ${CREATURE}`, beast(fps, 4), ENEMIES[CREATURE].speed / fps, refBeast);
 }
 
 /* ------------------------------------------------------------------ 2. pixels -- */

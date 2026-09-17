@@ -1070,7 +1070,10 @@ export class Animator {
    * Advance and apply the pose.
    *
    * @param dt      seconds
-   * @param state   { speed, grounded, swimming, gliding, climbing, auto }
+   * @param state   { speed, grounded, swimming, gliding, climbing, auto, advance }
+   *                `advance` is the ground the body covered this frame, in metres, when the
+   *                caller knows it (see the base layer below); omit it and the odometer falls
+   *                back to `speed * dt`.
    */
   update(dt, state = {}) {
     const ctx = this.ctx;
@@ -1090,7 +1093,23 @@ export class Animator {
       // Distance-driven so the feet don't slide: one cycle per stride, and the stride is
       // whatever this character's legs imply at this speed.
       ctx.gait = gaitAt(ctx.speed, this.legLen);
-      this.basePhase += (ctx.speed * dt) / ctx.gait.stride;
+      // Ground covered, not time elapsed. `state.advance` is how far this body actually moved
+      // since the last frame, which is the only thing the feet can be planted against: a remote
+      // actor's position is interpolated against the wall clock while `dt` here is the loop's,
+      // clamped to 50 ms, so `speed * dt` under-counts the ground on every frame slower than
+      // 20 fps and the planted foot slides forward to make up the difference. Callers that move
+      // their own body by `speed * dt` (the local player) pass no `advance` and are unchanged.
+      //
+      // Not capped. The first form of this line was `min(advance, stride)`, meant to keep the legs
+      // from spinning through a teleport — but one stride is exactly one *cycle*, so on every
+      // frame whose ground reached the stride the phase advanced by a whole turn and the pose came
+      // out bit-identical: the legs froze mid-stride while the body slid, which is the defect this
+      // whole path exists to fix, reintroduced at low frame rates only. The pose is periodic, so
+      // walking a long step through it is exactly right for a real stride and harmless for a
+      // correction: a body that jumps while standing still is in `idle`, and one that jumps while
+      // running lands on an arbitrary phase for a single frame.
+      const step = state.advance != null ? state.advance : ctx.speed * dt;
+      this.basePhase += step / ctx.gait.stride;
       bt = this.basePhase % 1;
       // Footfalls come from the same phase the feet are placed from, so a dust puff or a
       // step sound can never drift away from the step it belongs to.

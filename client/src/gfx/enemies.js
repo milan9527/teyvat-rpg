@@ -1902,10 +1902,20 @@ function buildRigged(kind, def, M) {
   let mScale = 1;
   const strideRef = K.gait ? measureStride(K, S, bones, rest, group) : 0;
   const strideSin = K.gait ? Math.sin(K.gait.amp) : 1;
+  // The ground one cycle covers at this speed, in world metres: the measured cycle is for a
+  // full-speed swing, and a shorter swing reaches proportionally less far — the one part of this
+  // that *is* trigonometry. One function so the odometer's divisor and the number a probe states
+  // its resolution in cannot drift apart.
+  const strideAt = (v) => {
+    if (!K.gait) return 0;
+    const run = Math.min(1, Math.max(0, v) / K.gait.top);
+    return strideRef * mScale * (Math.sin(K.gait.amp * run) / strideSin);
+  };
 
   return {
     group, skinned, bones, height: S.h, dims: S,
     setModelScale(v) { mScale = v > 0 ? v : 1; },
+    strideAt,
     update(dt, t, st = {}) {
       for (const [n] of K.bones) bones[n].rotation.copy(rest[n]);
       let s = st;
@@ -1914,11 +1924,16 @@ function buildRigged(kind, def, M) {
       // depend on how many times the tool happened to call update.
       if (K.gait && st.gait == null) {
         const v = Math.max(0, st.speed ?? 0);
-        const run = Math.min(1, v / K.gait.top);
-        // The measured cycle is for a full-speed swing; a shorter swing reaches proportionally
-        // less far, which is the one part of this that *is* trigonometry.
-        const stride = strideRef * mScale * (Math.sin(K.gait.amp * run) / strideSin);
-        if (dt > 0 && stride > 1e-3) gait += (v * dt / stride) * Math.PI * 2;
+        const stride = strideAt(v);
+        // The ground the body covered this frame when the caller knows it (`ActorSystem` does: it
+        // interpolates the position itself), `v * dt` when it does not. The two differ on every
+        // frame slower than 20 fps, because the position comes from the wall clock and `dt` is
+        // clamped to 50 ms — a creature chasing you at 6 fps slid three quarters of its ground.
+        // Uncapped: clamping the step to one stride is clamping the phase to one whole cycle, and
+        // a whole cycle per frame draws the same pose forever (a live chase at 3 fps measured
+        // 0.0000 rad of thigh spread over 15 frames with the clamp in).
+        const step = st.advance != null ? st.advance : v * dt;
+        if (step > 0 && stride > 1e-3) gait += (step / stride) * Math.PI * 2;
         s = { ...st, gait };
       }
       K.pose(bones, t, s, S);
@@ -1931,9 +1946,11 @@ function buildRigged(kind, def, M) {
 /**
  * Build the model for an enemy id (or a `{ ...def }` object). Returns
  * `{ group, height, update(dt, t, state) }` where `state` is
- * `{ speed, attack, gait, gaitOffset, phase2 }`:
+ * `{ speed, attack, advance, gait, gaitOffset, phase2 }`:
  *   speed      — world units/second, drives the gait blend
  *   attack     — 0 for none, else 0..1 progress through the current attack
+ *   advance    — metres of ground covered since the last frame, when the caller knows it;
+ *                the gait clock integrates this instead of `speed * dt` (see the odometer)
  *   gait       — optional override of the gait clock (radians), for a fixed pose
  *   gaitOffset — optional per-actor shift of that clock, so a pack of wolves running
  *                together does not step in perfect unison (see `gaitPhase`)

@@ -65,12 +65,14 @@ mkdirSync(outDir, { recursive: true });
 for (const f of readdirSync(outDir)) if (f.endsWith('.png')) rmSync(`${outDir}/${f}`);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-let pass = 0, fail = 0;
+let pass = 0, fail = 0, skips = 0;
 function check(name, ok, detail = '') {
   if (ok) { pass++; console.log(`  PASS ${name}${detail ? ` — ${detail}` : ''}`); }
   else { fail++; console.log(`  FAIL ${name}${detail ? ` — ${detail}` : ''}`); }
   return !!ok;
 }
+/** A claim whose precondition this run could not meet — reported, never counted as green. */
+function skip(name, why) { skips++; console.log(`  SKIP ${name} — ${why}`); }
 
 /**
  * Fraction of pixels inside `r` that differ by more than `tol` in any channel.
@@ -479,21 +481,62 @@ try {
   // Walk to the first station, sampling the *remote* locomotion speed the browser derives
   // while it happens: `_syncPlayers` computes it from the snapshot pair, and it is what
   // decides whether the model runs or slides.
-  let topSpeed = 0, walking = true;
-  const watch = (async () => {
-    for (let i = 0; i < 240 && walking; i++) {
-      const s = await p.evaluate((id) => {
-        const e = window.game.actors.players.get(id);
-        return e ? { speed: e.speed } : null;
-      }, gid).catch(() => null);
-      if (s) topSpeed = Math.max(topSpeed, s.speed);
-      await sleep(250);
-    }
-  })();
-  await ghost.walkTo(P1.x, P1.z, { y: P1.y });
+  //
+  // Sampled **inside the page, once per frame**, by wrapping `actors.update` — because `speed`
+  // is a per-frame quantity and polling it from out here reads the frames a round-trip happens
+  // to land on. The ghost covers the 9.2 m to P1 in 1.65 s and llvmpipe draws 3 fps under suite
+  // load, so the whole walk fits between two `p.evaluate` calls: this assertion once reported
+  // `peak 0.00 m/s` in a run where the same ghost's body changed 37.6% of the P1 rect. `frames`
+  // is printed beside the peak for the same reason — a zero over 0 frames is a probe that never
+  // looked, a zero over 40 is the product — and so is the animator's own base clip, which is
+  // what the player actually sees: a remote player whose speed reads zero is *sliding*, feet
+  // planted in `idle`, and that is a claim about the pose rather than about a number.
+  const STEP = 0.9, PACKET_MS = 150, GHOST_MPS = STEP / (PACKET_MS / 1000);
+  //
+  // The recorder also keeps the *input* to that derivation — how far the ghost's row moved
+  // between the two snapshots each frame was interpolated from — because "the speed came out
+  // zero" has two completely different causes and the fix is in a different file for each: a
+  // derivation that dropped the movement, or a pair of snapshots the ghost had not moved between
+  // (which is a claim about the window this frame was drawn against, and makes the assertion
+  // below unanswerable rather than false).
+  await p.evaluate((id) => {
+    const g = window.game;
+    const fresh = () => ({ peak: 0, frames: 0, seen: 0, poses: [], noWin: 0, noRow: 0,
+      pairMax: 0, spans: [], moves: [], dts: [] });
+    window.__spd = fresh();
+    window.__spdReset = () => { window.__spd = fresh(); };
+    const inner = g.actors.update.bind(g.actors);
+    g.actors.update = (dt, t, win) => {
+      const out = inner(dt, t, win);
+      const s = window.__spd;
+      s.frames++;
+      if (s.dts.length < 40) s.dts.push(+dt.toFixed(3));
+      if (!win) s.noWin++;
+      else {
+        const row = (snap) => (snap.data.players || []).find((r) => Number(r.id) === id);
+        const ra = row(win.a), rb = row(win.b);
+        if (!ra || !rb) s.noRow++;
+        else {
+          const d = Math.hypot(rb.x - ra.x, rb.z - ra.z);
+          s.pairMax = Math.max(s.pairMax, d);
+          if (s.moves.length < 40) {
+            s.moves.push(+d.toFixed(2));
+            s.spans.push(win.b.serverNow - win.a.serverNow);
+          }
+        }
+      }
+      const e = g.actors.players.get(id);
+      if (!e) return out;
+      s.seen++;
+      s.peak = Math.max(s.peak, e.speed);
+      const base = e.actor.animator?.base;
+      if (base && !s.poses.includes(base)) s.poses.push(base);
+      return out;
+    };
+  }, gid);
+  await ghost.walkTo(P1.x, P1.z, { y: P1.y, step: STEP, ms: PACKET_MS });
   await ghost.stand({ ry: Math.atan2(st.me.x - P1.x, st.me.z - P1.z) });
-  walking = false;
-  await watch;
+  const spd = await p.evaluate(() => window.__spd);
   check('no correction: the server accepted the walk', !ghost.corrected,
     ghost.corrected ? JSON.stringify(ghost.corrected) : 'none');
 
@@ -511,8 +554,34 @@ try {
     Math.hypot(them.x - P1.x, them.z - P1.z) < 2.0,
     `client has ${them.x}, ${them.z}; they walked to ${P1.x}, ${P1.z}`);
   check('...with hp the plate can draw', them.hp > 0 && them.maxHp > 0, `${them.hp}/${them.maxHp}`);
-  check('the remote locomotion speed was driven by the walk, not left at zero',
-    topSpeed > 2, `peak ${topSpeed.toFixed(2)} m/s`);
+  // Bounded from both sides against the speed the ghost was *driven* at, rather than against a
+  // number typed here: 0.9 m every 150 ms is 6 m/s, and the ceiling matters too — `_syncPlayers`
+  // clamps at 12 m/s, so a derivation that double-counted the snapshot span would sit at the
+  // clamp and still be "greater than 2".
+  console.log(`  (${spd.frames} frame(s) drawn during the walk, ${spd.seen} with the ghost in them,`
+    + ` ${spd.noWin} with no snapshot window, ${spd.noRow} with no row for them;`
+    + ` dt ${spd.dts.join('/')} s; the pair each frame interpolated moved them`
+    + ` ${spd.moves.join('/')} m over ${spd.spans.join('/')} ms)`);
+  // The precondition: this claim is about a *derivation*, and it cannot be answered on frames whose
+  // snapshot pair does not straddle any movement — at 2-3 fps under llvmpipe a whole 1.65 s walk
+  // can be drawn from windows that each sit inside one 100 ms step.
+  const pairMps = spd.pairMax / ((spd.spans[0] || 100) / 1000);
+  if (spd.pairMax < 0.02) {
+    const why = `none of the ${spd.frames} frame(s) drawn during the walk was interpolated across a`
+      + ' pair the ghost moved in, so nothing was asked of the derivation';
+    skip('the remote locomotion speed was driven by the walk, not left at zero', why);
+    // The clip follows from the speed, so it is the same unanswered question wearing a pose.
+    skip('...and the model was in a locomotion pose while they moved, not sliding in idle', why);
+  } else {
+    check('the remote locomotion speed was driven by the walk, not left at zero',
+      spd.peak > GHOST_MPS * 0.5 && spd.peak < GHOST_MPS * 1.9,
+      `peak ${spd.peak.toFixed(2)} m/s against the ${GHOST_MPS.toFixed(2)} m/s the ghost ran`
+      + ` (the widest pair drawn was worth ${pairMps.toFixed(2)} m/s),`
+      + ` over ${spd.seen} of ${spd.frames} frame(s) drawn during the walk`);
+    check('...and the model was in a locomotion pose while they moved, not sliding in idle',
+      spd.poses.some((b) => ['walk', 'run', 'sprint'].includes(b)),
+      `base clip(s) ${spd.poses.length ? spd.poses.join(', ') : 'none — they were never on a drawn frame'}`);
+  }
 
   const joinLine = await p.evaluate((before) => {
     const now = document.querySelector('.chatlog')?.textContent || '';
@@ -719,7 +788,7 @@ console.log('\nerrors ->', errs.length ? JSON.stringify([...new Set(errs)].slice
 console.log('hmr    ->', hmr.length ? `${hmr.length} update(s) — RUN IS INVALID` : 'none');
 check('no page errors during the run', errs.length === 0, `${errs.length}`);
 check('client/src was not hot-updated mid-run', hmr.length === 0, `${hmr.length}`);
-console.log(`\n${pass} passed, ${fail} failed`);
+console.log(`\n${pass} passed, ${fail} failed${skips ? `, ${skips} skipped` : ''}`);
 await b.close();
 // A green run has to have counted something. The `catch` above turns a bail into one FAIL,
 // which is honest but small: without this floor, an exception three assertions in would be

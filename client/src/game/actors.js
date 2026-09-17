@@ -61,6 +61,25 @@ function gaitOffsetFor(id) {
   return ((h >>> 0) % 1000) / 1000 * Math.PI * 2;
 }
 
+/**
+ * The time constant of the derived-speed smoother, in seconds.
+ *
+ * Both syncs below used to write `speed = speed * 0.7 + inst * 0.3`, which is not a smoothing
+ * *rate* but a smoothing *per drawn frame*: it settles with τ = 47 ms at 60 fps and τ = 933 ms at
+ * 3 fps, so the same teammate crossing the same ground is drawn in a different clip on a fast
+ * machine than on a slow one (measured: `sprint` at 60 fps, `run` at 30/20/12/6, for one ghost
+ * running at a steady 6 m/s). This constant is derived from the pair it replaces rather than
+ * chosen: with τ = -(1/60)/ln(0.7), `1 - exp(-dt/τ)` is 0.30000000000000004 at dt = 1/60, so a
+ * client running at the rate the old blend was authored against behaves as it always did, and
+ * every other rate now behaves like that one instead of like its own frame budget.
+ */
+export const SPEED_TAU = -(1 / 60) / Math.log(0.7);
+
+/** Approach `inst` from `prev` over `SPEED_TAU`, framerate-independently. */
+export function smoothSpeed(prev, inst, dt) {
+  return prev + (inst - prev) * (1 - Math.exp(-Math.max(0, dt) / SPEED_TAU));
+}
+
 /** Shortest-arc angle lerp. */
 function lerpAngle(a, b, t) {
   let d = b - a;
@@ -359,34 +378,42 @@ export class ActorSystem {
    */
   update(dt, t, win) {
     if (win) {
-      this._syncPlayers(win);
-      this._syncEnemies(win);
+      this._syncPlayers(win, dt);
+      this._syncEnemies(win, dt);
       this._syncProjectiles(win);
     }
 
+    // `advance` — the ground this body actually covered since the last frame — is handed over and
+    // cleared, because it is a quantity per *drawn frame* and not a state: a frame that draws
+    // without a snapshot window (before the stream has two snapshots, or after a stall) moves the
+    // body nowhere, and legs that kept stepping on the last known advance would skate for free.
     for (const e of this.players.values()) {
       e.actor.update(dt, t, {
         speed: e.speed,
         grounded: e.grounded,
         auto: e.autoLoco,
+        advance: e.advance,
       });
+      e.advance = 0;
     }
     for (const e of this.enemies.values()) {
       e.actor.update(dt, t, {
         speed: e.speed,
         attack: e.attacking,
+        advance: e.advance,
         // `gaitOffset`, never `gait`: the battle phase used to be passed here under the
         // name `phase`, which is also what the pose functions call their gait clock, and
         // an integer in that slot froze the legs of every walker in the game.
         gaitOffset: e.gaitOffset,
         phase2: e.phase >= 2,
       });
+      e.advance = 0;
     }
   }
 
   /* ------------------------------------------------------------- players -- */
 
-  _syncPlayers(win) {
+  _syncPlayers(win, dt = 1 / 60) {
     const seen = new Set();
     const listB = win.b.data.players || [];
     const byIdA = new Map((win.a.data.players || []).map((p) => [p.id, p]));
@@ -399,7 +426,11 @@ export class ActorSystem {
         const actor = new CharacterActor(nb.c, this.scene);
         e = {
           actor, x: nb.x, y: nb.y, z: nb.z, ry: nb.ry,
-          speed: 0, grounded: true, autoLoco: true, missing: 0,
+          // `fresh`: the first pair this actor is seen in *seeds* the speed instead of being
+          // blended into a zero nobody measured. A teammate who was already running when they
+          // streamed in used to be drawn walking, then running, over the smoother's first few
+          // frames — an idle-to-run ramp the server never sent.
+          speed: 0, fresh: true, advance: 0, grounded: true, autoLoco: true, missing: 0,
           hp: nb.hp, maxHp: nb.mhp, action: nb.a, nickname: nb.n,
           charId: nb.c, aura: nb.au, shield: nb.sh, shieldElement: nb.she, party: nb.pt,
         };
@@ -414,16 +445,24 @@ export class ActorSystem {
 
       const na = byIdA.get(nb.id) || nb;
       const u = win.u;
+      const px = e.x, pz = e.z;
       e.x = na.x + (nb.x - na.x) * u;
       e.y = na.y + (nb.y - na.y) * u;
       e.z = na.z + (nb.z - na.z) * u;
       e.ry = lerpAngle(na.ry, nb.ry, u);
+      // The ground this body just covered, in the same place the position it covered it with is
+      // written. The legs are driven from *this* rather than from speed×dt, because the two do not
+      // agree: the body is interpolated against the wall clock while `dt` is clamped to 50 ms in
+      // the game loop, so below 20 fps the body outruns its own stride count and the planted foot
+      // skates (measured on this build: 12 % of the ground slid at 60 fps, 31 % at 20, 90 % at 12).
+      e.advance = (e.advance || 0) + Math.hypot(e.x - px, e.z - pz);
       // Speed for the locomotion blend, taken from the *snapshot pair* rather
       // than the frame delta: the frame delta is scaled by the interpolation
       // factor and would read as near-zero on the frames where u barely advances.
       const span = Math.max(0.001, (win.b.serverNow - win.a.serverNow) / 1000);
       const inst = Math.hypot(nb.x - na.x, nb.z - na.z) / span;
-      e.speed = Math.min(12, e.speed * 0.7 + inst * 0.3);
+      e.speed = Math.min(12, e.fresh ? inst : smoothSpeed(e.speed, inst, dt));
+      e.fresh = false;
 
       e.hp = nb.hp; e.maxHp = nb.mhp; e.shield = nb.sh; e.shieldElement = nb.she;
       e.aura = nb.au; e.nickname = nb.n; e.party = nb.pt;
@@ -474,7 +513,7 @@ export class ActorSystem {
 
   /* ------------------------------------------------------------- enemies -- */
 
-  _syncEnemies(win) {
+  _syncEnemies(win, dt = 1 / 60) {
     const seen = new Set();
     const listB = win.b.data.enemies || [];
     const byIdA = new Map((win.a.data.enemies || []).map((p) => [p.id, p]));
@@ -486,7 +525,7 @@ export class ActorSystem {
         const actor = new EnemyActor(nb.t, this.scene);
         e = {
           actor, x: nb.x, y: nb.y, z: nb.z, ry: nb.ry,
-          speed: 0, attacking: null, phase: nb.ph || 1, missing: 0,
+          speed: 0, fresh: true, advance: 0, attacking: null, phase: nb.ph || 1, missing: 0,
           hp: nb.hp, maxHp: nb.mhp, level: nb.lv, defId: nb.t,
           shield: nb.sh, shieldMax: nb.shm, aura: nb.au, frozen: nb.fz,
           alive: nb.a !== 0, gaitOffset: gaitOffsetFor(nb.id),
@@ -503,9 +542,14 @@ export class ActorSystem {
       e.y = na.y + (nb.y - na.y) * u;
       e.z = na.z + (nb.z - na.z) * u;
       e.ry = lerpAngle(na.ry, nb.ry, u);
+      // The same two quantities as for a player: the ground covered drives the legs, the snapshot
+      // pair drives the blend. (A hilichurl's planted foot slid 1 % of the ground at 60 fps on the
+      // old code and 75 % at 6 fps, against `gait-check`'s 4 % bar for a local walker.)
+      e.advance = (e.advance || 0) + Math.hypot(e.x - px, e.z - pz);
       const span = Math.max(0.001, (win.b.serverNow - win.a.serverNow) / 1000);
       const inst = Math.hypot(nb.x - na.x, nb.z - na.z) / span;
-      e.speed = e.speed * 0.7 + inst * 0.3;
+      e.speed = e.fresh ? inst : smoothSpeed(e.speed, inst, dt);
+      e.fresh = false;
 
       e.hp = nb.hp; e.maxHp = nb.mhp; e.level = nb.lv;
       e.shield = nb.sh; e.shieldMax = nb.shm;

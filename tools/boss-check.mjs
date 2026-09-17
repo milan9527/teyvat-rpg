@@ -330,11 +330,18 @@ try {
     kindsWithGait === 4 && /const GAIT = \{/.test(enemiesSrc)
     && !/rotation\.x = d \* 0\.\d+ \* run/.test(enemiesSrc),
     `${kindsWithGait} kinds carry a GAIT entry, and no pose hardcodes a thigh amplitude`);
+  // The step is the ground the caller measured when it knows it (`ActorSystem` interpolates the
+  // position itself, so it does) and `speed * dt` when it does not — and it is *not* clamped to a
+  // stride, because one stride is one whole cycle and a whole cycle per frame draws the same pose
+  // forever. Both halves are named here: the fall-back is what a tool-stepped or window-less frame
+  // gets, and the missing clamp is a fix this file measured the absence of (0.0000 rad below).
   check('and the clock is integrated from ground covered, not from t',
-    /gait \+= \(v \* dt \/ stride\) \* Math\.PI \* 2/.test(enemiesSrc)
+    /const step = st\.advance != null \? st\.advance : v \* dt;/.test(enemiesSrc)
+    && /gait \+= \(step \/ stride\) \* Math\.PI \* 2/.test(enemiesSrc)
     && /strideRef \* mScale \* \(Math\.sin\(K\.gait\.amp \* run\) \/ strideSin\)/.test(enemiesSrc)
     && /function measureStride\(/.test(enemiesSrc),
-    'buildRigged integrates speed·dt / stride, and the stride is measured off the rig');
+    'buildRigged integrates the ground covered (else speed·dt) over a stride measured off the rig,'
+    + ' uncapped');
 
   // Everything above poses the rig by hand, which means it would still pass with the bug put
   // back: the state object `ActorSystem.update` builds is never involved. So one more, through

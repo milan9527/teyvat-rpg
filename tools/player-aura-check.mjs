@@ -383,8 +383,15 @@ try {
       // "the light landed nearer to me than to it" is a claim about one picture, and the body
       // section moves the boom between the freeze and the frames that claim is measured on.
       const s = window.__hit?.d?.src ? g.actors.enemies.get(window.__hit.d.src) : null;
+      // ...and each subject as the *body* it is, not one point on it: feet and crown through the
+      // same camera, each with its own height off its own actor. A light drawn on my chest and
+      // head is 0.75 m from a point at 0.9 m and 0.34 m from a 1.05 m creature's midpoint, so a
+      // point-to-point comparison hands the claim to whichever body happens to be short.
+      const body = (o, h) => ({ foot: V(o.x, o.y, o.z), head: V(o.x, o.y + h, o.z) });
       return { V, me, up, perM: +Math.abs(up.y - me.y).toFixed(1),
         srcAt: s ? V(s.x, s.y + (s.actor.height || 1) * 0.5, s.z) : null,
+        meBody: body(g.me, g.me.actor?.height || 1.7),
+        srcBody: s ? body(s, s.actor?.height || 1) : null,
         w: el.clientWidth, h: el.clientHeight,
         dist: +Math.hypot(g.camera.position.x - g.me.x, g.camera.position.y - (g.me.y + 0.9),
           g.camera.position.z - g.me.z).toFixed(2) };
@@ -1289,23 +1296,55 @@ try {
     throw new Error('nothing to locate');
   }
   const cx = lit.x, cy = lit.y;
-  const dMe = Math.hypot(cx - view.me.x, cy - view.me.y) / view.perM;
-  check('the light was drawn at the player', dMe < 2.5,
-    `the effect's centre is ${dMe.toFixed(2)} m from my own projection`
-    + ` (${cx.toFixed(0)},${cy.toFixed(0)} against ${view.me.x},${view.me.y})`);
-  const srcPt = view.srcAt;
-  const apart = srcPt ? Math.hypot(srcPt.x - view.me.x, srcPt.y - view.me.y) : null;
-  if (!srcPt || Math.abs(srcPt.z) > 1) {
+  /**
+   * How far the light's centre is from a subject's **body** — the nearest point of its
+   * feet-to-crown segment on screen, in metres.
+   *
+   * Both subjects go through the same function, because the point version of this got the answer
+   * backwards: the reaction is drawn over the chest and head (bbox 430-616 x 136-310, my feet at
+   * y 452 and my crown at y 215), so its centre sits 0.75 m from a single point at 0.9 m of my
+   * 1.7 m — while a 1.05 m slime standing 0.28 m off my axis on screen has its midpoint 0.34 m
+   * from the same blob. `dMe < dSrc` then failed on a blob whose own x-centre agreed with my axis
+   * to 1 px. Against bodies the same frame reads 0.01 m against 0.27 m.
+   *
+   * A segment is easier to be near than a point, and the shorter body is the one that loses by
+   * it, so both segments are printed with the reading.
+   */
+  const toBody = (b) => {
+    const vx = b.foot.x - b.head.x, vy = b.foot.y - b.head.y;
+    const len2 = vx * vx + vy * vy;
+    const u = len2 ? Math.max(0, Math.min(1, ((cx - b.head.x) * vx + (cy - b.head.y) * vy) / len2)) : 0;
+    return Math.hypot(cx - (b.head.x + vx * u), cy - (b.head.y + vy * u)) / view.perM;
+  };
+  const span = (b) => `${b.foot.x.toFixed(0)},${b.foot.y.toFixed(0)}→${b.head.x.toFixed(0)},${b.head.y.toFixed(0)}`;
+  const dMe = toBody(view.meBody);
+  check('the light was drawn at the player', dMe < 1,
+    `the effect's centre is ${dMe.toFixed(2)} m from my body`
+    + ` (${cx.toFixed(0)},${cy.toFixed(0)} against a body running ${span(view.meBody)})`);
+  const sb = view.srcBody;
+  // Both bodies are in the picture, or there is nothing to compare against.
+  if (!sb || Math.abs(sb.foot.z) > 1 || Math.abs(sb.head.z) > 1) {
     skip('...rather than at the creature that hit me', 'the attacker has no screen position');
-  } else if (apart < 80) {
-    skip('...rather than at the creature that hit me',
-      `it was ${apart.toFixed(0)} px away on screen — a melee attacker standing on top of me`
-      + ' cannot tell the two apart');
   } else {
-    const dSrc = Math.hypot(cx - srcPt.x, cy - srcPt.y) / view.perM;
-    check('...rather than at the creature that hit me', dMe < dSrc,
-      `${dMe.toFixed(2)} m from me, ${dSrc.toFixed(2)} m from ${frozen.src.name}`
-      + ` (${apart.toFixed(0)} px apart on screen)`);
+    const dSrc = toBody(sb);
+    // The margin, not just the verdict: on this fight the two bodies overlap on screen (their
+    // axes were 0.28 m apart), and the readings that decide it are 0.01 m against 0.27 m — so the
+    // claim is worth making down to a margin of about a limb's width, and no further. Below that
+    // the light is equally near both bodies and no centroid can attribute it; a *negative* margin
+    // still fails, because "nearer the attacker than me" is the defect this assertion is for.
+    const margin = dSrc - dMe;
+    const axes = Math.abs(view.meBody.foot.x - sb.foot.x) / view.perM;
+    const detail = `${dMe.toFixed(2)} m from my body (${span(view.meBody)}),`
+      + ` ${dSrc.toFixed(2)} m from ${frozen.src.name}'s (${span(sb)}),`
+      + ` axes ${axes.toFixed(2)} m apart on screen`;
+    if (Math.abs(margin) < 0.1) {
+      skip('...rather than at the creature that hit me',
+        `it is the same distance from both bodies to within ${Math.abs(margin).toFixed(2)} m`
+        + ` — ${detail}`);
+    } else {
+      check('...rather than at the creature that hit me', margin > 0,
+        `${detail}, a margin of ${margin.toFixed(2)} m`);
+    }
   }
 
   check('...and asks for its own sound', rec.cues.includes(REACTION_SFX[hit.d.reaction]),
