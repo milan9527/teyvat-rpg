@@ -49,6 +49,29 @@ const AURA_WASH_FROZEN = 0.62;
 const EMPTY = [];
 
 /**
+ * Which clips mean "the weapon is in the hand", and how long it stays there.
+ *
+ * `attachWeapon` has always authored two transforms per weapon type — one in the hand, one on
+ * the back or hip — and `setSheathed` had **no caller anywhere in the project**, so every
+ * character walked, swam, climbed and stood in town with the weapon out. Photographed against
+ * black at noon that is not a small thing: a 0.75 m sword hanging off an idle hand reaches the
+ * floor (measured 0.01 m *under* the soles for 莉拉, 0.066 m for 伊格纳's claymore, 0.000 for
+ * 凯伦's bow) and crosses the skirt, the near thigh, the knee and the boot on its way down.
+ *
+ * The state is read off the animator rather than from the call that started the action, because
+ * there are three doors into an attack (`LocalPlayer` plays the clip itself, `playAction`
+ * decodes a remote action byte, and the combo code re-fires) and only the animator sees all
+ * three. `aim` is a locomotion clip, so both layers have to be checked.
+ */
+const DRAWN_CLIPS = new Set([
+  'attack1', 'attack2', 'attack3', 'attack4', 'attack5', 'charged', 'skill', 'burst', 'aim', 'plunge',
+]);
+/** Clips that put it away at once: nobody swims or climbs with a claymore in their fist. */
+const STOW_NOW = new Set(['swim', 'climb', 'glide', 'sit', 'down']);
+/** Seconds the weapon stays out after the last combat clip. */
+const STOW_DELAY = 4.5;
+
+/**
  * A stable per-actor shift of the gait clock, in radians, derived from the enemy id.
  *
  * A camp spawns three hilichurls in the same frame from the same def, so without this they
@@ -111,6 +134,9 @@ export class CharacterActor {
     this.height = 1.7;
     this.aura = null;
     this.hitFlash = 0;
+    // Seconds of "weapon out" left. Starts at 0, so a character walks into the world with the
+    // weapon stowed and draws it the first time they swing.
+    this._drawT = 0;
 
     this.setCharacter(charId);
   }
@@ -134,7 +160,9 @@ export class CharacterActor {
     if (this.weaponId !== wid || !this.weapon) {
       this.weapon?.dispose?.();
       this.weaponId = wid;
-      this.weapon = attachWeapon(this.rig, wid, { element: def.element });
+      // Built into whichever hand or holster the body is using *now*: pressing 2 mid-fight must
+      // not put the incoming character's sword away, and switching in town must not draw it.
+      this.weapon = attachWeapon(this.rig, wid, { element: def.element, sheathed: this._drawT <= 0 });
     }
     // The element aura is subtle at rest and pushed up during a burst.
     this.baseAuraStrength = REST_AURA;
@@ -203,6 +231,26 @@ export class CharacterActor {
     setHitFlash(this.rig.group, v);
   }
 
+  /**
+   * Draw the weapon while there is fighting to do, and put it away afterwards.
+   *
+   * Both layers are read: the melee strings, the skill, the burst and the plunge are one-shot
+   * overlays, while a bow's `aim` is a locomotion clip that replaces the base. The timer is a
+   * countdown rather than a "last swing at t" so it needs no clock at all — which matters here,
+   * because `dt` is clamped and a remote body's animator is stepped from the render loop.
+   */
+  _driveSheath(dt) {
+    if (!this.weapon) return;
+    if (DRAWN_CLIPS.has(this.animator.overlay) || DRAWN_CLIPS.has(this.animator.base)) {
+      this._drawT = STOW_DELAY;
+    } else if (STOW_NOW.has(this.animator.base)) {
+      this._drawT = 0;
+    } else {
+      this._drawT = Math.max(0, this._drawT - Math.max(0, dt));
+    }
+    this.weapon.setSheathed(this._drawT <= 0);
+  }
+
   /** Boost the aura for the duration of a skill/burst cast. */
   pulseAura(strength = 0.7, seconds = 1.2) {
     this._auraPulse = strength;
@@ -212,6 +260,7 @@ export class CharacterActor {
   update(dt, t, state) {
     if (!this.animator) return;
     this.animator.update(dt, state);
+    this._driveSheath(dt);
     this.weapon?.update(dt, t);
     if (this.hitFlash > 0) {
       this.hitFlash = Math.max(0, this.hitFlash - dt * 5);

@@ -985,8 +985,10 @@ export function buildHumanoid(def, opts = {}) {
   offhandSlot.position.set(0, -P.limbR * 0.9, P.limbR * 0.2);
   bones.handL.add(offhandSlot);
 
-  // Back slot (sheathed weapon).
+  // Back slot — where every sheathed weapon now hangs, so it is the slot a probe is most
+  // likely to look up by name. It was the one of the four with no `name` set.
   const backSlot = new THREE.Object3D();
+  backSlot.name = 'backSlot';
   backSlot.position.set(0, -P.torsoH * 0.1, -P.waistW * 0.85);
   bones.chest.add(backSlot);
 

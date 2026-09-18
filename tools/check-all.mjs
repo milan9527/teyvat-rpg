@@ -278,6 +278,15 @@ const SPEC = [
   // red at 45/6/2 as registered, all six about *where* the aura is drawn (its centre is 6.6 m from
   // the character's own projection) — a defect this row exists to keep visible, not to hide.
   { name: 'player-aura-check', group: 'visual', needs: 'browser', timeout: 30 * MIN, args: [`${runDir}/art-player-aura`] },
+  // The thing the character is *holding*, which no probe above can see: `motion-check` grades the
+  // body's silhouette against a hidden-avatar frame, and a weapon dragging through the floor is
+  // inside that silhouette. `attachWeapon` authored a stowed transform per weapon type and
+  // `setSheathed` had no caller anywhere, so every character in the game stood in town with the
+  // blade out, 0.010-0.066 m *under* their own soles and up to 61.6 % of it inside their leg.
+  // Measures both states on the rig (clearance, pierce, gap) for all five weapon types on the two
+  // most different bodies that carry each, photographs the stowed weapon against a
+  // weapon-hidden control, and drives every member of DRAWN_CLIPS and STOW_NOW.
+  { name: 'weapon-check', group: 'visual', needs: 'token', timeout: 20 * MIN, args: ['--out', `${runDir}/art-weapon-check`] },
   // No screenshots and no tier: it marches rigs and reads bone matrices, so it is the one
   // motion probe that cannot be fooled by a stale frame.
   { name: 'gait-check', group: 'browser', needs: 'browser', timeout: 10 * MIN },

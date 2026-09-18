@@ -411,32 +411,67 @@ const BUILDERS = { sword: buildSword, claymore: buildClaymore, polearm: buildPol
  * The hand bone's local −Y runs out along the hand, so a weapon built along +Y
  * needs roughly a quarter turn past that to sit in a hammer grip: the grip axis
  * of a sword crosses the palm, it does not continue the forearm.
+ *
+ * Both tables were chosen by measurement rather than by eye, because "the blade
+ * hangs down beside the leg" turns out to mean two different things depending on
+ * how tall the leg is. Every candidate was scored on the model, on the *two most
+ * different bodies* that carry that weapon type (1.58 m 娜依达 vs 1.62 m 莉拉 for
+ * swords, 1.72 m 泰拉 vs 1.86 m 伊格纳 for claymores, …) and judged on the worse
+ * of the two, on three numbers:
+ *
+ *   - `clearance` — lowest weapon vertex above the soles. The shipped numbers were
+ *     **−0.010 m** for 莉拉's sword, **−0.066 m** for 伊格纳's claymore and
+ *     **0.000 m** for 凯伦's bow: the tip was in the dirt, or under it.
+ *   - `pierce` — weapon vertices inside the body capsules (thighs, shins, torso,
+ *     head). Shipped: 7.7% of the sword, **53.8%** of the claymore, **61.6%** of
+ *     the bow.
+ *   - `gap` — distance from the nearest vertex to the body *surface*, for the
+ *     stowed poses only: a scabbard has to touch the back, and a large positive
+ *     gap is a weapon floating behind someone.
+ *
+ * The key finding was that rotation alone cannot fix a held pose. Lifting the tip
+ * off the floor by rolling the wrist swings the blade into the near thigh — the
+ * best rotation-only sword candidate that cleared the soles still had 42% of its
+ * vertices inside the leg. The grip has to move *out* from the palm as well, so
+ * every held entry now carries a small `pos`.
  */
 const ATTACH = {
-  // Blades continue the *arm line* rather than sticking out perpendicular to it:
-  // the model's +Y maps to a little forward of the hand's −Y. At idle that hangs
-  // the blade down beside the leg, and when an attack throws the arm out the
-  // blade extends past the hand, which is the shape an anime cut is drawn with.
-  sword:    { slot: 'weaponSlot', rot: [Math.PI - 0.34, 0, 0.16], pos: [0, 0, 0] },
-  claymore: { slot: 'weaponSlot', rot: [Math.PI - 0.48, 0, 0.10], pos: [0, 0, 0] },
+  // Held out and forward at ~65° off the arm line, offset 8 cm outboard of the
+  // palm: 0.0% pierce, tip 0.47 m above the soles, grip still 0.11 m from the
+  // hand bone so it reads as gripped rather than magnetically trailing.
+  sword:    { slot: 'weaponSlot', rot: [2.00, 0, 0.55], pos: [0.08, 0, 0.06] },
+  // Same idea, further out and yawed away from the hip — a 0.76 m slab needs the
+  // room. 1.9% pierce (a rivet clipping the glove), clearance 0.34 m.
+  claymore: { slot: 'weaponSlot', rot: [2.15, -0.20, 0.40], pos: [0.10, 0.04, 0.08] },
   // A polearm cannot hang: gripped 40% up a 2.7 m shaft, blade-down puts the head
-  // through the floor. Held head-up and forward instead.
-  polearm:  { slot: 'weaponSlot', rot: [1.05, 0, 0.06], pos: [0, 0, 0.01] },
+  // through the floor. Held head-up and forward instead — 1.1% / 0.49 m.
+  polearm:  { slot: 'weaponSlot', rot: [1.35, 0, 0.20], pos: [0.08, 0, 0.01] },
   // The bow's limb plane has to stay vertical with the string toward the archer,
   // so the yaw is a half turn and the only freedom is the roll that keeps the
-  // lower limb clear of the leg.
-  bow:      { slot: 'offhandSlot', rot: [0, Math.PI, 0.42], pos: [0, 0, 0] },
-  // Catalysts float outboard of the offhand rather than being gripped.
+  // lower limb clear of the leg. Rolled to 1.20 rad it carries across the hips:
+  // 4.6% / 0.36 m, against 61.6% / 0.000 m for the near-vertical shipped pose.
+  bow:      { slot: 'offhandSlot', rot: [0.20, 2.94, 1.20], pos: [0.04, 0, 0.08] },
+  // Catalysts float outboard of the offhand rather than being gripped, which is
+  // why this one needed no change: 0.0% pierce, 0.43 m clearance as authored.
   catalyst: { slot: 'offhandSlot', rot: [0, -0.5, 0], pos: [-0.10, 0.04, 0.13] },
 };
 
-/** Sheathed/stowed transforms. */
+/**
+ * Sheathed/stowed transforms — the pose a character is in whenever nobody is
+ * fighting, which is most of the time (see `_driveSheath` in game/actors.js).
+ *
+ * Everything goes on the back, including the sword. The hip carry it used to have
+ * had never been rendered and does not survive being looked at: 41.0% of the
+ * blade's vertices were inside 莉拉's own torso and left thigh, and the whole
+ * weapon photographed as a single gold speck at her waist. On the back the same
+ * sword reads as a sword from every angle, at 0.0% pierce and a 0.009 m gap.
+ */
 const STOW = {
-  sword:    { slot: 'hipSlot', rot: [0.16, 0, -0.30], pos: [-0.02, -0.06, -0.02] },
-  claymore: { slot: 'backSlot', rot: [0.30, 0.10, -0.55], pos: [0.04, -0.12, -0.05] },
-  polearm:  { slot: 'backSlot', rot: [0.26, 0.06, -0.34], pos: [0.02, 0.10, -0.05] },
-  bow:      { slot: 'backSlot', rot: [0.22, Math.PI, 0.55], pos: [-0.05, 0, -0.06] },
-  catalyst: { slot: 'backSlot', rot: [0.20, 0, 0], pos: [0, -0.02, -0.06] },
+  sword:    { slot: 'backSlot', rot: [0.28, 0.10, -0.62], pos: [0.06, -0.10, -0.07] },
+  claymore: { slot: 'backSlot', rot: [0.24, 0.08, -0.40], pos: [0.08, -0.16, -0.10] },
+  polearm:  { slot: 'backSlot', rot: [0.20, 0.06, -0.55], pos: [0.02, 0.10, -0.05] },
+  bow:      { slot: 'backSlot', rot: [0.22, Math.PI, 0.85], pos: [-0.05, 0, -0.09] },
+  catalyst: { slot: 'backSlot', rot: [0.20, 0.40, 0], pos: [0, -0.02, -0.11] },
 };
 
 /** Resolve a weapon id or a loose `{type, rarity, element}` spec. */
