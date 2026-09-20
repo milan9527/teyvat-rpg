@@ -8,6 +8,7 @@ import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { FXAAShader } from 'three/examples/jsm/shaders/FXAAShader.js';
 import { SMAAPass } from 'three/examples/jsm/postprocessing/SMAAPass.js';
+import { BLOOM_THRESHOLD } from '../gfx/toon.js';
 
 /** Colour grading + vignette + subtle chromatic edge, tuned for the anime look. */
 const GradeShader = {
@@ -150,7 +151,9 @@ export class Renderer {
     this.renderPass = new RenderPass(this.scene, this.camera);
     this.composer.addPass(this.renderPass);
 
-    this.bloom = new UnrealBloomPass(new THREE.Vector2(size.x, size.y), 0.26, 0.62, 0.95);
+    // The threshold is the cel shader's business as much as this pass's: a lit surface stops just
+    // below it, so anything still above it is something that means to glow. See gfx/toon.js.
+    this.bloom = new UnrealBloomPass(new THREE.Vector2(size.x, size.y), 0.26, 0.62, BLOOM_THRESHOLD);
     this.composer.addPass(this.bloom);
 
     this.grade = new ShaderPass(GradeShader);

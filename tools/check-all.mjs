@@ -304,6 +304,12 @@ const SPEC = [
   // without it. It found a 42 px hard-edged coin on the crown of every head, which is what the
   // shader had always drawn while hairMaterial's docstring claimed an anisotropic band.
   { name: 'hair-sheen-check', group: 'visual', needs: 'token', timeout: 12 * MIN, args: ['--out', `${runDir}/art-hair-sheen`] },
+  // Bloom is the only pass that can make a *correct* material wrong, because its threshold is a
+  // scene-linear luminance and a pale diffuse albedo under the sun passes it without meaning to.
+  // It found kaelen's hair throwing a halo over 2.47x its own on-screen area — a fog that ate the
+  // silhouette and greyed the sky behind her. Every row is paired: nothing may glow, and the
+  // ceiling that stops it may not dim the surface or stop an emissive from reaching past bloom.
+  { name: 'surface-glow-check', group: 'visual', needs: 'token', timeout: 15 * MIN, args: ['--out', `${runDir}/art-surface-glow`] },
 ];
 
 // A group name that is not in the default set is a probe that never runs: the row is written,

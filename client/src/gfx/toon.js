@@ -12,6 +12,16 @@
 
 import * as THREE from 'three';
 
+/**
+ * Where bloom starts, in linear luminance.
+ *
+ * engine/renderer.js builds UnrealBloomPass with this number and TOON_FRAG stops a lit surface
+ * just below it, so the rule "a lit surface is not a light source" lives in the same place as the
+ * pass that would otherwise punish it. Two consumers, one constant, and they cannot drift apart.
+ */
+export const BLOOM_THRESHOLD = 0.95;
+const SURFACE_CEIL = BLOOM_THRESHOLD - 0.05;
+
 const TOON_PARS = /* glsl */`
 uniform float uBands;
 uniform float uRampSoft;
@@ -23,6 +33,7 @@ uniform float uSpecStep;
 uniform float uSpecSharp;
 uniform vec3  uSpecColor;
 uniform float uSpecAniso;
+uniform float uSurfaceCeil;
 uniform float uEmissivePulse;
 uniform float uElementGlow;
 uniform vec3  uElementColor;
@@ -308,6 +319,37 @@ const TOON_FRAG = /* glsl */`
     }
   #endif
 
+  // --- a lit surface is not a light source -----------------------------------
+  // Everything above is the surface answering the lights: diffuse bands, ambient, fill, torches.
+  // Bloom in this game starts at a linear luminance of BLOOM_THRESHOLD (engine/renderer.js reads
+  // the same constant), and that threshold is *below* what an ordinary pale material returns with
+  // the sun on it. kaelen's hair is albedo #dfe9f2, luminance 0.80 before a single light touches
+  // it; the lit band alone carries it past 0.95, so the whole lit side of her head is fed to the
+  // bloom pass as if it were glowing. What that looks like at portrait size is not a highlight, it
+  // is fog: the halo thrown over the background covered 2.4x as many pixels as the hair itself,
+  // where the other six characters measure 0.00 to 0.06 (tools/surface-glow-check.mjs).
+  //
+  // Multiplying that character's albedo by 0.8 removed the halo completely (2.40 -> 0.003) while
+  // pushing uSpecStep past 1 or uRimStrength to 0 changed it by nothing (2.47, 2.465), which is
+  // what says the *diffuse* response is the term crossing the line, not the highlight or the rim.
+  //
+  // So the light response gets a ceiling just under the threshold, and everything that is meant to
+  // glow is added after it and keeps the whole HDR range: the stepped specular (a white uSpecColor
+  // still reaches 1.0, so the sheen band itself still blooms -- a thin bright line, which is the
+  // anime look, instead of a glowing skull), the rim, the elemental aura and totalEmissiveRadiance
+  // for weakspots and boss phases.
+  //
+  // A scale on the colour, not a clamp per channel: clamping channels drifts a pale hue toward
+  // white as two of them clip and one does not, which is the same gamut mistake ACES makes on
+  // saturated greens. At luminance below the ceiling the factor is exactly min(1.0, big) = 1.0, so
+  // every material that was not already past the bloom threshold renders bit-identically -- and
+  // uSurfaceCeil 0 turns the whole thing off, which is how a probe proves that in one page instead
+  // of across two builds on a driver that does not repeat itself to the byte.
+  if (uSurfaceCeil > 0.0) {
+    float surfLum = dot(col, vec3(0.2126, 0.7152, 0.0722));
+    col *= min(1.0, uSurfaceCeil / max(surfLum, 1e-4));
+  }
+
   // --- stepped specular ------------------------------------------------------
   // A mix, not an add. The add was unbounded: a plate at the specular angle got the whole of
   // uSpecColor laid on top of its already-lit top band, and uSpecSharp 0.88 is an exponent of
@@ -447,6 +489,9 @@ const DEFAULTS = {
   specColor: 0xffffff,
   // 0 = a round Blinn-Phong spot. Only hair asks for the strand band; see hairMaterial.
   specAniso: 0.0,
+  // The luminance a lit surface stops at, so that bloom means "this glows" and not "this is pale".
+  // 0 switches it off; nothing in the game does that, and a probe does it to A/B the same frame.
+  surfaceCeil: SURFACE_CEIL,
   sway: 0.0,
 };
 
@@ -461,6 +506,7 @@ export function toonMaterial(opts = {}) {
     rimWidth = DEFAULTS.rimWidth, rimColor = DEFAULTS.rimColor,
     specStep = DEFAULTS.specStep, specSharp = DEFAULTS.specSharp,
     specColor = DEFAULTS.specColor, specAniso = DEFAULTS.specAniso,
+    surfaceCeil = DEFAULTS.surfaceCeil,
     sway = DEFAULTS.sway,
     rootDark = 0, rootH = 1, mottle = 0, mottleScale = 1.6, mottleSpeck = 1,
     shadowFloor = 0.14, rampFloor = 0, fill = 0,
@@ -484,6 +530,7 @@ export function toonMaterial(opts = {}) {
     uSpecSharp: { value: specSharp },
     uSpecColor: { value: new THREE.Color(specColor) },
     uSpecAniso: { value: specAniso },
+    uSurfaceCeil: { value: surfaceCeil },
     uEmissivePulse: { value: 0 },
     uElementGlow: { value: 0 },
     uElementColor: { value: new THREE.Color(0xffffff) },
