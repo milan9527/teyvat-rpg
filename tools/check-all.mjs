@@ -82,6 +82,9 @@ const SPEC = [
   { name: 'quality-check',   group: 'data', evidence: /all checks passed|(\d+) check\(s\) failed/ },
   { name: 'gamut-check',      group: 'data', evidence: /(\d+) colours, (\d+) out of gamut/ },
   { name: 'humanoid-check',  group: 'data', evidence: /all garments clear the skin|wear their own skin colour/ },
+  // Faces, measured by ray-casting the baked geometry: no WebGL, so it belongs with the data
+  // probes even though every claim it makes is about pixels.
+  { name: 'face-check',      group: 'data' },
 
   // --- server + database + redis, over http/ws ------------------------------------
   { name: 'api-check',   group: 'http', needs: 'api', timeout: 6 * MIN },

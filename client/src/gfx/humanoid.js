@@ -253,6 +253,80 @@ function hairTone(colorHex, amt = 0.22) {
 /* --------------------------------------------------------------------- hair -- */
 
 /**
+ * The fringe as one continuous sheet laid on the forehead, with a scalloped hem.
+ *
+ * The locks alone cannot do this job, and the measurement says so: nine tapered wedges
+ * spaced 0.23 rad apart cover **43.2 %** of the band between the front cap's lower edge
+ * and the brow line, in 29 separate gaps totalling 183 grid cells — a comb, with the
+ * forehead showing through between its teeth. Widening the wedges until they overlap at
+ * the tips would weld the fringe into one paddle, so the coverage belongs to a surface and
+ * the silhouette belongs to the locks that hang over it.
+ *
+ * Authored in head space off `surfacePoint`, so it inherits the skull's taper and its flat
+ * face plane rather than floating off a sphere of its own. Two shells (an outer skin and an
+ * inner one a hair's breadth further in) joined along the hem and both side edges: a single
+ * sheet is invisible from below, where a camera looking up at a face sees its back faces.
+ */
+function fringeSheet(r, opts = {}) {
+  const {
+    yawSpan = 1.02,           // a touch wider than the locks, to reach the sideburns
+    top = 0.54,               // tucked under the front cap, which reaches down to pitch 0.41
+    hem = 0.28,               // the hem sits just below the brow line (the brows are at 0.33)
+    wave = 0.060, waves = 4,  // scallops, so the hem is not one drawn arc
+    droop = 0.10,             // ...and hangs lower at the sides, framing the cheekbones
+    cols = 22, rows = 4,
+    outTop = 1.030, outHem = 1.085,   // the hem lifts off the skull: hair has volume
+    thick = 0.030,
+  } = opts;
+  const hemAt = (u) => hem - wave * Math.cos(waves * 2 * Math.PI * u) - droop * (2 * u - 1) ** 2;
+  const pos = [];
+  const idx = [];
+  const ring = (cols + 1) * (rows + 1);
+  for (let shell = 0; shell < 2; shell++) {
+    for (let j = 0; j <= rows; j++) {
+      const t = j / rows;
+      for (let i = 0; i <= cols; i++) {
+        const u = i / cols;
+        const yaw = (u * 2 - 1) * yawSpan;
+        const pitch = top + (hemAt(u) - top) * t;
+        const out = (outTop + (outHem - outTop) * t) - shell * thick;
+        const p = surfacePoint(r, yaw, pitch, out);
+        pos.push(p.x, p.y, p.z);
+      }
+    }
+  }
+  const at = (shell, j, i) => shell * ring + j * (cols + 1) + i;
+  for (let shell = 0; shell < 2; shell++) {
+    for (let j = 0; j < rows; j++) {
+      for (let i = 0; i < cols; i++) {
+        const a = at(shell, j, i), b = at(shell, j, i + 1), c = at(shell, j + 1, i + 1), d = at(shell, j + 1, i);
+        // The inner shell is wound the other way so both sets of normals face outward.
+        if (shell === 0) idx.push(a, d, c, a, c, b);
+        else idx.push(a, c, d, a, b, c);
+      }
+    }
+  }
+  // Rim along the hem, and down both side edges, so the sheet reads as a solid with an edge
+  // instead of a pair of surfaces with a gap between them.
+  for (let i = 0; i < cols; i++) {
+    const o0 = at(0, rows, i), o1 = at(0, rows, i + 1), i0 = at(1, rows, i), i1 = at(1, rows, i + 1);
+    idx.push(o0, i0, i1, o0, i1, o1);
+  }
+  for (const [i, flip] of [[0, true], [cols, false]]) {
+    for (let j = 0; j < rows; j++) {
+      const o0 = at(0, j, i), o1 = at(0, j + 1, i), n0 = at(1, j, i), n1 = at(1, j + 1, i);
+      if (flip) idx.push(o0, o1, n1, o0, n1, n0);
+      else idx.push(o0, n1, o1, o0, n0, n1);
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  return g;
+}
+
+/**
  * Emit the hair as bake-ready part descriptors laid out in *head* space. Long
  * masses are driven by the springy hair bones so they lag behind head turns;
  * the skull cap and tight styles ride the head rigidly.
@@ -283,26 +357,37 @@ function buildHair(style, r, matA, matTie, matB = matA) {
     thetaStart: Math.PI * 0.26, thetaLength: Math.PI * 0.46,
   }), 'head', 0, r * 0.03, 0);
 
-  // Fringe: overlapping tapered wedges spanning the hairline down over the brow.
-  // Each wedge is laid between two points on the *skull surface* rather than
-  // positioned by hand, so it hugs the forehead instead of sinking into it.
   const hpm = (geo, bone, matrix, mat = matA) => out.push({ geo, mat, bone, parentBone: 'head', matrix });
-  const fringeCount = 9;
-  for (let i = 0; i < fringeCount; i++) {
-    const t = (i / (fringeCount - 1)) * 2 - 1;
+  // The sheet carries the coverage; the locks laid over it carry the silhouette. Splitting
+  // the two jobs is the whole fix: the locks used to be responsible for both and could do
+  // neither — nine of them spaced evenly left 29 gaps of bare forehead between their tips
+  // (43.2 % of the band covered), and once they were wide enough to close those gaps they
+  // welded into one paddle.
+  hpm(fringeSheet(r), 'hairFront', trs(0, 0, 0));
+  // Authored clumps, not an even fan: lateral position, width scale, tip pitch, tip yaw
+  // skew. An even fan of equal-length wedges photographs as corrugation — the eye reads
+  // the repeat before it reads the hair — so the widths run 0.8..1.25 and the points sit
+  // at six different heights, with the longest ones at the sides framing the cheekbones.
+  const LOCKS = [
+    [-0.98, 1.00, 0.02, -0.05], [-0.74, 1.25, 0.20, 0.03], [-0.50, 0.82, 0.07, -0.04],
+    [-0.24, 1.12, 0.26, 0.05], [0.02, 0.86, 0.13, -0.06], [0.28, 1.22, 0.24, 0.04],
+    [0.54, 0.84, 0.05, -0.03], [0.78, 1.08, 0.18, 0.04], [0.98, 0.95, 0.01, -0.05],
+  ];
+  LOCKS.forEach(([t, ws, tipPitch, skew], i) => {
     const yaw = t * 0.92;
-    // Bases tuck up under the skull cap; tips hang lowest at the sides, framing
-    // the cheekbones. Blunt-ended wedges (not points) so the fringe reads as one
-    // mass rather than a row of spikes with forehead showing between them.
-    // `out` < 1 on purpose: the wedge is a flat-capped cylinder, so a top placed
-    // *on* the cap surface pokes its end disc back out through it and the crown
-    // ends up ringed with little rectangular tabs, like a paper crown. Bury it.
-    const top = surfacePoint(r, yaw, 0.76 - Math.abs(t) * 0.06, 0.97);
-    const tip = surfacePoint(r, yaw * 1.18, 0.46 - Math.abs(t) * 0.30, 1.10);
-    const w = r * 0.21 * (1 - Math.abs(t) * 0.14);
-    hpm(new THREE.CylinderGeometry(w * 0.30, w, tip.distanceTo(top), 7, 1), 'hairFront',
-      spanMat(top, tip, -t * 0.4, 1.1, 0.62), alt(i));
-  }
+    // Bases tuck up under the skull cap. `out` < 1 on purpose: the lock is a cylinder, so a
+    // top placed *on* the cap surface pokes its end disc back out through it and the crown
+    // ends up ringed with little rectangular tabs, like a paper crown. The strand then
+    // grazes out through the sheet around mid-forehead, which is where it earns its volume.
+    const top = surfacePoint(r, yaw, 0.80 - Math.abs(t) * 0.06, 0.99);
+    const tip = surfacePoint(r, yaw * 1.18 + skew, tipPitch, 1.12 + (1 - ws) * 0.02);
+    const w = r * 0.17 * ws * (1 - Math.abs(t) * 0.10);
+    // Very nearly a cone: a blunt tip is a flat disc pointing at the viewer, and a row of
+    // them photographs as a crown of bright cannon barrels. Nothing needs the blunt end any
+    // more now that the sheet behind carries the coverage the wide wedges used to owe.
+    hpm(new THREE.CylinderGeometry(w * 0.05, w, tip.distanceTo(top), 6, 1), 'hairFront',
+      spanMat(top, tip, -t * 0.4, 1.25, 0.45), alt(i));
+  });
   // Sideburn locks framing the cheeks — cheap, and a big readability win.
   for (const sgn of [-1, 1]) {
     const top = surfacePoint(r, sgn * 1.02, 0.34, 1.07);
@@ -433,9 +518,14 @@ function buildHair(style, r, matA, matTie, matB = matA) {
         // Deterministic per-index variation — random() here would make every
         // character rebuild look different.
         const up = 0.5 + ((i * 37) % 11) / 11 * 0.5;
-        hp(new THREE.ConeGeometry(r * 0.2, r * (1.1 + up * 0.7), 5), 'head',
-          Math.cos(a) * r * 0.62, r * 0.72, Math.sin(a) * r * 0.6,
-          -Math.sin(a) * 0.7 + 0.1, 0, Math.cos(a) * 0.7, alt(i));
+        // The front spikes have to stand up instead of out: leaning a 0.23 m cone forward
+        // over the face put a quarter of 沃特's own iris behind his hair (55 of 226 cells,
+        // upper-outer on both eyes, measured straight from the front). So the forward half
+        // is shorter, thinner and raised, and it keeps far more of its lean.
+        const fwd = Math.max(0, Math.sin(a));
+        hp(new THREE.ConeGeometry(r * 0.2 * (1 - 0.22 * fwd), r * (1.1 + up * 0.7) * (1 - 0.45 * fwd), 5), 'head',
+          Math.cos(a) * r * 0.62, r * (0.72 + 0.12 * fwd), Math.sin(a) * r * 0.6,
+          -Math.sin(a) * (0.7 - 0.58 * fwd) + 0.1, 0, Math.cos(a) * 0.7, alt(i));
       }
       break;
     }
@@ -701,9 +791,17 @@ export function buildHumanoid(def, opts = {}) {
     // Upper lash line: heavier than the socket ring and flicked outward.
     face(new THREE.BoxGeometry(R * 0.44, R * 0.075, R * 0.045), matPupil,
       yaw, EYE_PITCH + 0.155, 1.02, 1, 1, 1, tilt - s * 0.10);
-    // Brow, thin and set well above the lid.
-    face(new THREE.BoxGeometry(R * 0.32, R * 0.036, R * 0.030), matBrow,
-      yaw, EYE_PITCH + 0.40, 1.012, 1, 1, 1, tilt - s * 0.16);
+    // Brow, thin and set well above the lid. Three overlapping segments along an arch
+    // rather than one bar: a single box is a horizontal black rectangle at any angle,
+    // which is the one shape a face never has. Each segment sits a little further out
+    // in yaw, peaks in the middle, and thins toward the outer tail.
+    for (let k = 0; k < 3; k++) {
+      const u = k / 2;                                   // 0 inner (nose) .. 1 outer tail
+      face(new THREE.BoxGeometry(R * 0.150 * (1 - 0.16 * u), R * 0.044 * (1 - 0.50 * u), R * 0.028),
+        matBrow, yaw + s * (u - 0.5) * 0.24,
+        EYE_PITCH + 0.40 + 0.030 * Math.sin(u * Math.PI),
+        1.012, 1, 1, 1, tilt - s * 0.16 + s * (0.5 - u) * 0.22);
+    }
     // Blush keeps the cheeks from reading flat.
     face(sphere(R * 0.16, 8), matBlush, s * 0.62, -0.30, 1.004, 1.0, 0.40, 0.10);
   }
@@ -1007,6 +1105,9 @@ export function buildHumanoid(def, opts = {}) {
     materials: {
       matSkin, matHair, matHairB, matPrimary, matSecondary, matAccent, matEye, matMetal,
       matBoots, matSheet, matSheetAccent,
+      // Face materials are exported so a geometry probe can pick the brow out of the
+      // merged mesh's material groups; tools/face-check.mjs is their consumer.
+      matBrow,
     },
     P, height: P.h,
   };
