@@ -729,6 +729,9 @@ export function buildHumanoid(def, opts = {}) {
   // Brows are a shade darker than the hair so they stay visible under the fringe.
   const matBrow = flat(new THREE.Color(body.hairColor).multiplyScalar(0.45).getHex());
   const matNose = flat(new THREE.Color(body.skin).multiplyScalar(0.80).getHex());
+  // The ear gets its own tone, a touch cooler than the cheek. That also gives face-check a
+  // handle on it: inside one merged skin material an ear is indistinguishable from the skull.
+  const matEar = flat(new THREE.Color(body.skin).multiplyScalar(0.94).getHex());
 
   const parts = [];
   const push = (geo, mat, bone, matrix, soft) => parts.push({ geo, mat, bone, matrix, ...soft });
@@ -810,9 +813,22 @@ export function buildHumanoid(def, opts = {}) {
   face(sphere(R * 0.055, 8), matNose, 0, -0.19, 1.008, 0.85, 0.55, 0.14);
   // Mouth: a short wide dash, not a dot.
   face(sphere(R * 0.10, 12), matMouth, 0, -0.42, 1.006, 1.30, 0.26, 0.16);
-  // Ears
+  // Ears, and the one thing they must not do: read as a patch stuck on the hair.
+  //
+  // The shipped ear was a skin-material sphere at `out` 0.94 — its centre *inside* the skull
+  // — so the only part of it anyone ever saw was the sliver standing past the inflated hair
+  // cap. Photographed from the side that is a four-cell skin-coloured hexagon floating in the
+  // middle of the hair, which is exactly what it looked like.
+  //
+  // Pushing it out instead only made the patch bigger (16 cells, standing 0.070 R clear of
+  // the hair behind it — and still inside the hair's silhouette, so still a decal). Every one
+  // of the seven styles `buildHair` can build covers the side of the skull down past the jaw,
+  // so there is nowhere on these heads for an ear to *emerge*: it would have to be tucked
+  // out from under a notch in the hair, which is a change to the hair, not to the ear.
+  // So the ear is a properly shaped shell that the hair covers completely, and face-check
+  // gates both halves — the shape exists, and no style lets it through.
   for (const s of [-1, 1]) {
-    face(sphere(R * 0.17, 10), matSkin, s * 1.42, -0.06, 0.94, 0.85, 1.35, 0.40);
+    face(sphere(R * 0.19, 12), matEar, s * 1.34, -0.08, 0.90, 0.80, 1.30, 0.35, -s * 0.14);
   }
 
   // --- arms ----------------------------------------------------------------
@@ -1105,9 +1121,9 @@ export function buildHumanoid(def, opts = {}) {
     materials: {
       matSkin, matHair, matHairB, matPrimary, matSecondary, matAccent, matEye, matMetal,
       matBoots, matSheet, matSheetAccent,
-      // Face materials are exported so a geometry probe can pick the brow out of the
-      // merged mesh's material groups; tools/face-check.mjs is their consumer.
-      matBrow,
+      // Face materials are exported so a geometry probe can pick a feature out of the merged
+      // mesh's material groups; tools/face-check.mjs is their consumer.
+      matBrow, matEar,
     },
     P, height: P.h,
   };

@@ -21,12 +21,17 @@
 //     level row of bright bars. Authored clumps of six different lengths read 0.159.
 //   * The eyebrow was one `BoxGeometry` — a black rectangle, the one shape a face never
 //     has. A bar has no arch (the middle cannot ride above both ends) and no taper.
+//   * The ear was a sphere at `out` 0.94 — centre *inside* the skull — so the only part of it
+//     that ever reached the screen was the cap standing past the inflated hair cap: from the
+//     side, a four-cell skin-coloured island floating in the middle of the hair.
 //
 // So the gates come in two-sided pairs, because each one alone has a cheap wrong answer:
 // hair must cover the forehead (or the fringe is a comb) but must never cover the iris (or
 // the "coverage" fix is a curtain over the eyes); the hem must not be level (or the locks
 // are corrugation) but must stay a hem (tips still present); the brow must arch and taper
-// but stay inside a sane span and thickness (or "not a bar" is satisfied by a blob).
+// but stay inside a sane span and thickness (or "not a bar" is satisfied by a blob); the ear
+// must be a shaped shell that exists on both sides *and* be covered by every hair style
+// (or "no patch on the hair" is satisfied by deleting the ear).
 //
 // Bars are set after measuring both the fix and the defect, and the defect is re-measured
 // by reverting the product — see 开发日志 for the mutation run.
@@ -97,6 +102,10 @@ const std = (a) => Math.sqrt(mean(a.map((v) => (v - mean(a)) ** 2)));
 // bounded separately — a bar over the whole band would mostly be measuring the cap.
 const P0 = 0.33, P1 = 0.75, YW = 0.92, FRINGE_P = 0.46;
 const NY = 46, NP = 24;
+// The side of the head: a 30x30 window ±1.15 R tall by ±1.3 R wide, shot from the side and
+// from three-quarters, per side. 30 cells across 2.3 R is about 4 px of a 700 px portrait, so
+// a patch this grid can see is a patch the player can see.
+const EG = 30, EAR_VIEWS = [90, 55];
 // The hem sweep: fine steps, from above the hairline down past the eyes.
 const HNY = 61, HTOP = 0.60, HBOT = -0.30, HSTEP = 0.005;
 
@@ -219,6 +228,80 @@ function measure(def) {
     }
   }
 
+  /* the side of the head: is the ear a shape, and does the hair cover it? */
+  //
+  // Two questions, one sweep. Parallel rays in from a camera orbiting the head at yaw `deg`
+  // per side; each cell records what it hits first. An island of skin-first cells that is not
+  // part of the face opening is a patch floating in the hair — which is what the shipped ear
+  // photographed as. The ear's own material answers the other half: how many cells it wins.
+  const ear = triangles(rig, [rig.materials.matEar]);
+  const side = { isle: 0, earCells: 0, stand: 0, verts: [0, 0], shell: [] };
+  {
+    const R2 = rig.P.headR;
+    const stands = [];
+    for (const s of [-1, 1]) for (const deg of EAR_VIEWS) {
+      const a = s * deg * Math.PI / 180;
+      const eye = [Math.sin(a), 0, Math.cos(a)];
+      const rt = [Math.cos(a), 0, -Math.sin(a)];
+      const dir = [-eye[0], 0, -eye[2]];
+      const grid = [];
+      for (let j = 0; j < EG; j++) {
+        const y = o[1] + R2 * (-1.15 + 2.3 * ((j + 0.5) / EG));
+        const row = [];
+        for (let i = 0; i < EG; i++) {
+          const u = R2 * (-1.3 + 2.6 * ((i + 0.5) / EG));
+          const org = [o[0] + eye[0] * R2 * 4 + rt[0] * u, y, o[2] + eye[2] * R2 * 4 + rt[2] * u];
+          const ts = near(org, dir, skin), th = near(org, dir, hair), te = near(org, dir, ear);
+          if (te < ts && te < th) { side.earCells++; if (th < 1e9) stands.push((th - te) / R2); }
+          row.push(ts === 1e9 ? 0 : (th < ts ? 2 : 1));   // 0 nothing, 1 skin first, 2 hair over skin
+        }
+        grid.push(row);
+      }
+      // Components of skin-first cells. A patch floating in the hair is one with hair on
+      // *every* side of it; a component that reaches empty space or the edge of the window is
+      // part of the silhouette — the cheek in front of the hair's edge, or the neck running
+      // on below the shot. (Two earlier drafts of this filter could not see the defect they
+      // were written for. "The largest component is the face, the rest are islands" fails on
+      // 伊格纳's short hair, where the side mass cuts his cheek off from his jaw and the jaw
+      // block is the bigger piece. "Islands entirely above the jaw line" fails because the
+      // ear straddles that line too, so it threw the 4-cell ear patch away and passed.)
+      const seen = grid.map((r) => r.map(() => false));
+      for (let j = 0; j < EG; j++) {
+        for (let i = 0; i < EG; i++) {
+          if (grid[j][i] !== 1 || seen[j][i]) continue;
+          const cells = []; const st = [[j, i]]; seen[j][i] = true;
+          let enclosed = true;
+          while (st.length) {
+            const [y, x] = st.pop(); cells.push([y, x]);
+            for (const [dy, dx] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+              const ny = y + dy, nx = x + dx;
+              if (ny < 0 || nx < 0 || ny >= EG || nx >= EG) { enclosed = false; continue; }
+              if (grid[ny][nx] === 0) enclosed = false;
+              if (grid[ny][nx] !== 1 || seen[ny][nx]) continue;
+              seen[ny][nx] = true; st.push([ny, nx]);
+            }
+          }
+          if (enclosed) side.isle = Math.max(side.isle, cells.length);
+        }
+      }
+    }
+    side.stand = mean(stands);
+    // The ear itself: present on both sides, and a flattened shell rather than a ball.
+    for (const s of [-1, 1]) {
+      const bb = [1e9, 1e9, 1e9, -1e9, -1e9, -1e9];
+      let n = 0;
+      for (const t of ear) for (const v of t) {
+        if (Math.sign(v[0]) !== s) continue;
+        n++;
+        for (let k = 0; k < 3; k++) { bb[k] = Math.min(bb[k], v[k]); bb[3 + k] = Math.max(bb[3 + k], v[k]); }
+      }
+      side.verts[s < 0 ? 0 : 1] = n;
+      if (!n) { side.shell.push(null); continue; }
+      const thick = (bb[3] - bb[0]) / R2, height = (bb[4] - bb[1]) / R2;
+      side.shell.push({ height, thick, flat: height / thick });
+    }
+  }
+
   /* the brow, per side, in its own yaw/height frame */
   const browTris = triangles(rig, [rig.materials.matBrow]);
   const R = rig.P.headR;
@@ -261,7 +344,7 @@ function measure(def) {
     frac: cov / tot, low: lowCov / lowTot, lowTot, gapRuns, gapCells, biggest,
     tips: depths.length, depths, adjMean: mean(adj), rough: std(prof),
     lowest: depths.length ? Math.min(...depths) : 99,
-    irisCells, irisHidden, brows, hairTris: hair.length,
+    irisCells, irisHidden, brows, hairTris: hair.length, side,
   };
 }
 
@@ -295,6 +378,23 @@ const MIN_IRIS_CELLS = 40;
 // Brow: arched, tapering outward, and still a brow.
 const MIN_ARCH = 0.006, MAX_TAPER = 0.75;
 const SPAN = [0.25, 0.55], THICK = [0.020, 0.090];
+// The ear. Every style `buildHair` builds covers the side of the skull down past the jaw, so
+// there is nowhere on these heads for an ear to emerge: pushing the shipped one out until it
+// cleared the hair (16 cells standing 0.070 R proud) only made the patch bigger, because it
+// was still inside the hair's silhouette. So the ear is tucked under the hair, and these two
+// bars hold that from both ends — the shape has to exist, and no view may find it.
+//
+// Islands: the shipped ear reads 4 cells at the side view and 3 at three-quarters, on all
+// fourteen sides. The fix leaves 1-2 cell specks at the temple, where a ray coming in almost
+// tangentially slips under the fringe's hem — the hem lifts 0.085 R off the skull on purpose,
+// so that sliver is the price of the fringe having volume, and it is one grid cell. Hence a
+// bar of 2: a one-cell margin, which is thin, so the mutation run below is what carries this
+// gate, and it fires on every side of every body.
+// Flatness = height/thickness of the ear's own bounding box: 3.17 for the shell, 1.59 for the
+// shipped sphere scaled (0.85, 1.35, 0.40) — a ball on the side of the head.
+const MAX_SKIN_ISLE = 2;
+const MAX_EAR_CELLS = 0;
+const EAR_H = [0.30, 0.65], MIN_EAR_FLAT = 2.0;
 
 /* ----------------------------------------------------------------------- run -- */
 
@@ -326,6 +426,18 @@ for (const id of WHO) {
     `lowest tooth at pitch ${m.lowest.toFixed(3)} <= ${MAX_LOWEST}`);
   check(`${id}: the iris is not under the hair`, m.irisCells >= MIN_IRIS_CELLS && m.irisHidden === 0,
     `${m.irisHidden} of ${m.irisCells} iris cell(s) behind hair`);
+  const sh = m.side.shell;
+  check(`${id}: the ear exists on both sides`, m.side.verts[0] > 0 && m.side.verts[1] > 0,
+    `matEar vertices left ${m.side.verts[0]}, right ${m.side.verts[1]}`);
+  check(`${id}: the ear is a flattened shell`,
+    sh.every((e) => e && e.flat >= MIN_EAR_FLAT && e.height >= EAR_H[0] && e.height <= EAR_H[1]),
+    sh.map((e) => (e ? `${e.height.toFixed(2)} R tall / ${e.thick.toFixed(2)} thick = ${e.flat.toFixed(2)}` : 'missing')).join(', ')
+    + ` (flat >= ${MIN_EAR_FLAT}, height in [${EAR_H}])`);
+  check(`${id}: the hair covers the ear`, m.side.earCells <= MAX_EAR_CELLS,
+    `${m.side.earCells} ear cell(s) reach the camera over ${2 * EAR_VIEWS.length} views`
+    + (m.side.stand ? `, standing ${m.side.stand.toFixed(3)} R proud of the hair` : ''));
+  check(`${id}: no island of skin on the skull`, m.side.isle <= MAX_SKIN_ISLE,
+    `biggest island ${m.side.isle} cell(s) <= ${MAX_SKIN_ISLE}`);
   m.brows.forEach((b, k) => {
     const side = k ? 'right' : 'left';
     if (!b) { check(`${id}: ${side} brow found`, false, 'no matBrow triangles on this side'); return; }
@@ -350,13 +462,14 @@ for (const r of [...rows].sort((a, b) => a.low - b.low)) {
     + ` fringe ${(r.low * 100).toFixed(1)}% gaps ${String(r.gapRuns).padStart(2)}`
     + ` bare ${String(r.biggest).padStart(3)} teeth ${r.tips}`
     + ` Δ ${r.adjMean.toFixed(3)} rough ${r.rough.toFixed(3)} lowest ${r.lowest.toFixed(3)}`
-    + ` iris hidden ${r.irisHidden}/${r.irisCells}`);
+    + ` iris hidden ${r.irisHidden}/${r.irisCells}`
+    + ` ear ${r.side.earCells} cells, skin island ${r.side.isle}`);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
-// 16 per body plus one per hair style: a green run that measured nothing is the failure
+// 20 per body plus one per hair style: a green run that measured nothing is the failure
 // mode this count exists for.
-const want = WHO.length * 16 + HAIRS.length;
+const want = WHO.length * 20 + HAIRS.length;
 if (pass + fail < want) {
   console.log(`only ${pass + fail} assertions ran — expected ${want}`);
   process.exit(1);
