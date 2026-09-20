@@ -22,6 +22,7 @@ uniform vec3  uRimColor;
 uniform float uSpecStep;
 uniform float uSpecSharp;
 uniform vec3  uSpecColor;
+uniform float uSpecAniso;
 uniform float uEmissivePulse;
 uniform float uElementGlow;
 uniform vec3  uElementColor;
@@ -319,6 +320,71 @@ const TOON_FRAG = /* glsl */`
   // physics and what metalMaterial's comment always claimed.
   vec3 H = normalize(L + toonV);
   float spec = pow(max(dot(toonN, H), 0.0), mix(8.0, 220.0, uSpecSharp));
+  // Hair is not a sphere of varnish. A point lobe on a skull-shaped cap is a disc, and that is
+  // measurably what it drew: on a 700 px portrait the largest piece of the highlight's own mask
+  // was 41x43 px, aspect 0.95, 76% filled -- a hard-edged coin stuck to the top of the head at
+  // the same screen position on every character. uSpecAniso swaps the lobe for a Kajiya-Kay
+  // strand lobe, which is a *band across* the strands instead of a spot along the normal.
+  //
+  // It stays a blend rather than a branch on the material type because 0 is every other
+  // material's authored value, and at 0 this whole block is skipped.
+  if (uSpecAniso > 0.001) {
+    // Strands run down over the skull, so the tangent is world down flattened onto the surface.
+    // At the crown that degenerates -- the normal *is* up -- and there the parting runs front to
+    // back instead, so the tangent turns into that. It has to *turn*, not switch: a hard
+    // if (dot(tg, tg) < 0.04) fallback puts a discontinuity right across the apex, where the
+    // band is at its widest anyway, and the two tangents on either side of it disagree by ninety
+    // degrees. That is a pool of highlight on the crown, and it was the last thing left in this
+    // block: 50 and 60 px thick on kaelen's, whose hair mass is the biggest of the seven and so
+    // covers the most of the degenerate patch. Below 0.04 the direction is noise, above 0.25 it is
+    // the meridian, and in between it rotates from one to the other.
+    vec3 down = vec3(0.0, -1.0, 0.0);
+    vec3 fwd = vec3(0.0, 0.0, -1.0);
+    vec3 tg = down - toonN * dot(down, toonN);
+    vec3 tf = fwd - toonN * dot(fwd, toonN);
+    vec3 T = normalize(mix(tf, tg, smoothstep(0.04, 0.25, dot(tg, tg))) + vec3(1e-6));
+    float tH = dot(T, H);
+    // No tangent shift. Kajiya-Kay's shift (displacing the lobe along the strand, by
+    // sin(dot(objectSpacePosition, T) * 22) -- object space, or the bands slide up and down the
+    // head as the character walks uphill, and note that a fragment shader cannot get there from
+    // vToonWorld because three declares modelMatrix in its *vertex* prefix only: asking for it
+    // compiles to nothing, draws nothing, and every diff in the probe reads a silent zero) is
+    // what a texture would do on a mesh with real strands, and it was measured on all seven
+    // heads: it breaks the one band this geometry can carry into a
+    // lattice, 48 to 925 disconnected pieces per view, whose longest run is 84 px on lyra where
+    // the unshifted band runs 264. The locks here are smooth-shaded six-sided cylinders -- one
+    // continuous band along a lock is exactly what they can draw, and chopping it up is only
+    // speckle. Without the shift the same views come back as 14 to 67 pieces, 125 to 268 px long
+    // and 16 to 26 px thick.
+    //
+    // The band is no wider than a fixed angle, *and* no wider than a fixed number of pixels.
+    // Neither bound works alone, and both failures were measured on these seven heads.
+    //
+    // An angle alone (the Kajiya-Kay lobe raised to a power, which is the textbook form) has a
+    // fixed width in tH, and tH turns at wildly different rates across one character: 16 to 26 px
+    // on hair that is locks over a skull, but 50 and 60 px on the two side masses of the longest
+    // style, which are big and smooth and turn slowly. Pixels alone -- 15 * fwidth(tH) -- has no
+    // upper bound, and where the surface turns fast the window opens far enough to swallow it:
+    // that build put 133848 px of sheen on the same head, 49 % of the hair in shot, the whole
+    // back mass solid white.
+    //
+    // min() of the two is bounded from both directions by construction. wRad is where the lobe
+    // falls to 1/e, so this is the same band the exponent drew wherever the exponent was already
+    // the narrower of the two, which is six of the seven characters.
+    //
+    // fwidth needs no extension here: three dropped WebGL1 in r163, so this compiles as GLSL ES
+    // 3.0 where derivatives are core. It is the only fwidth in the project -- if that ever has to
+    // change, the failure mode is a shader that does not link and a character that does not draw,
+    // which is what tools/hair-sheen-check.mjs's "every shader compiled" row is watching for.
+    float p = mix(60.0, 900.0, uSpecSharp);
+    float wRad = sqrt(2.0 / p);
+    float wPx = 18.0 * max(fwidth(tH), 1e-6);
+    float aspec = 1.0 - smoothstep(0.0, min(wRad, wPx), abs(tH));
+    // sin(T,H) does not care which way the surface faces, so on its own the band wraps all the
+    // way round the head and lights the side pointing away from the sun. Keep the lit arc.
+    aspec *= smoothstep(0.0, 0.30, dot(toonN, H));
+    spec = mix(spec, aspec, uSpecAniso);
+  }
   float specStep = smoothstep(uSpecStep, uSpecStep + 0.06, spec);
   col = mix(col, uSpecColor, specStep * (1.0 - roughnessFactor * 0.75) * shadowAtten);
 
@@ -379,6 +445,8 @@ const DEFAULTS = {
   specStep: 0.55,
   specSharp: 0.6,
   specColor: 0xffffff,
+  // 0 = a round Blinn-Phong spot. Only hair asks for the strand band; see hairMaterial.
+  specAniso: 0.0,
   sway: 0.0,
 };
 
@@ -392,7 +460,8 @@ export function toonMaterial(opts = {}) {
     shadowTint = DEFAULTS.shadowTint, rimStrength = DEFAULTS.rimStrength,
     rimWidth = DEFAULTS.rimWidth, rimColor = DEFAULTS.rimColor,
     specStep = DEFAULTS.specStep, specSharp = DEFAULTS.specSharp,
-    specColor = DEFAULTS.specColor, sway = DEFAULTS.sway,
+    specColor = DEFAULTS.specColor, specAniso = DEFAULTS.specAniso,
+    sway = DEFAULTS.sway,
     rootDark = 0, rootH = 1, mottle = 0, mottleScale = 1.6, mottleSpeck = 1,
     shadowFloor = 0.14, rampFloor = 0, fill = 0,
     ...stdOpts
@@ -414,6 +483,7 @@ export function toonMaterial(opts = {}) {
     uSpecStep: { value: specStep },
     uSpecSharp: { value: specSharp },
     uSpecColor: { value: new THREE.Color(specColor) },
+    uSpecAniso: { value: specAniso },
     uEmissivePulse: { value: 0 },
     uElementGlow: { value: 0 },
     uElementColor: { value: new THREE.Color(0xffffff) },
@@ -591,7 +661,10 @@ export function addOutline(root, color = 0x14121c, thickness = 1.9) {
 /* -------------------------------------------------------- special materials -- */
 
 /**
- * Hair uses an anisotropic band highlight, drawn as a stretched specular.
+ * Hair uses an anisotropic band highlight: a Kajiya-Kay strand lobe (`specAniso`), whose
+ * highlight runs *across* the strands instead of pooling on the normal. This docstring used to
+ * claim the band while the shader ran plain Blinn-Phong, and the picture sided with the shader:
+ * a 42 px hard-edged disc on the crown of every character (see the specular block in TOON_FRAG).
  *
  * The rim and specular are scaled down as the base colour gets lighter. At full
  * strength on the near-white hair colours the fresnel rim and the highlight both
@@ -608,6 +681,7 @@ export function hairMaterial(color, tipColor) {
     roughness: 0.42,
     specStep: 0.42 + lum * 0.34,
     specSharp: 0.78,
+    specAniso: 1.0,
     // The sheen band takes the *tip* colour, not white. A white highlight on dark
     // hair adds ~0.7 to a base value of ~0.13, so the band lands at light grey and
     // the strand reads as a stripe of a different material; tinting it (and

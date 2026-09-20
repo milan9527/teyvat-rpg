@@ -299,6 +299,11 @@ const SPEC = [
   // player at every step. It found the tuft carpet ending 9 m from her feet and tripling in one
   // step, because residency kept a 3x3 block of 24 m cells on a 32 m trigger.
   { name: 'stream-check', group: 'browser', needs: 'browser', timeout: 25 * MIN },
+  // Photographs one thing on all seven characters and measures its *shape*: the hair highlight,
+  // isolated by pushing the hair's own uSpecStep past 1 so the control frame is the same frame
+  // without it. It found a 42 px hard-edged coin on the crown of every head, which is what the
+  // shader had always drawn while hairMaterial's docstring claimed an anisotropic band.
+  { name: 'hair-sheen-check', group: 'visual', needs: 'token', timeout: 12 * MIN, args: ['--out', `${runDir}/art-hair-sheen`] },
 ];
 
 // A group name that is not in the default set is a probe that never runs: the row is written,
