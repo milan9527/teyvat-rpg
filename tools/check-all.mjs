@@ -317,6 +317,13 @@ const SPEC = [
   // paired: the field has to discriminate *and* order a body correctly, it has to reach the screen
   // *and* only ever darken, and it has to shade crevices without dimming the character.
   { name: 'rig-occlusion-check', group: 'visual', needs: 'token', timeout: 15 * MIN, args: ['--out', `${runDir}/art-rig-occlusion`] },
+  // The iris owns ~9.5k px of a 700 px portrait — one of the biggest single features on a face —
+  // and held one value: its median and its 95th percentile were 0.1 counts apart, and on two
+  // characters the sign of what little relief it had was inverted. Nothing at that scale can shade
+  // it (a 4 mm lens under a 7.6 cm shadow texel), so the lid's shadow is authored: a two-tone on
+  // albedo driven by aPartV, the vertex's height up its *own part*. The rows that matter are the
+  // ordering (the lens is brighter at the bottom) and the ratio that separates it from a dimmer.
+  { name: 'iris-check', group: 'visual', needs: 'token', timeout: 15 * MIN, args: ['--out', `${runDir}/art-iris`] },
 ];
 
 // A group name that is not in the default set is a probe that never runs: the row is written,

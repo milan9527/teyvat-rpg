@@ -75,6 +75,7 @@ export function bakeSkinned(parts, ordered, boneIndexOf, bindWorld, opts = {}) {
   const normal = new Float32Array(total * 3);
   const skinIndex = new Uint16Array(total * 4);
   const skinWeight = new Float32Array(total * 4);
+  const partV = new Float32Array(total);
   const groups = [];
   const indices = [];
 
@@ -133,6 +134,24 @@ export function bakeSkinned(parts, ordered, boneIndexOf, bindWorld, opts = {}) {
       skinWeight[(vOff + i) * 4 + 1] = 1 - w;
     }
 
+    // Height up *this part*, 0 at its own lowest vertex and 1 at its highest, in bind space.
+    //
+    // A merged rig has one object space for the whole body, so the object-space gradient the
+    // material already carries (uRootH / vRootUp, written for a blade of grass) cannot say
+    // "the top of the iris": every face feature sits at y ≈ 1.5 m and spans 5 cm. This is the
+    // same quantity per part instead, which is the only frame in which a two-tone inside one
+    // small lens is expressible. A part with no vertical extent gets 0 — the identity.
+    let y0 = Infinity, y1 = -Infinity;
+    for (let i = 0; i < count; i++) {
+      const y = position[(vOff + i) * 3 + 1];
+      if (y < y0) y0 = y;
+      if (y > y1) y1 = y;
+    }
+    const ySpan = y1 - y0;
+    for (let i = 0; i < count; i++) {
+      partV[vOff + i] = ySpan > 1e-6 ? (position[(vOff + i) * 3 + 1] - y0) / ySpan : 0;
+    }
+
     const idx = g.index;
     if (idx) {
       for (let i = 0; i < idx.count; i++) indices.push(idx.getX(i) + vOff);
@@ -148,6 +167,7 @@ export function bakeSkinned(parts, ordered, boneIndexOf, bindWorld, opts = {}) {
   geo.setAttribute('normal', new THREE.BufferAttribute(normal, 3));
   geo.setAttribute('skinIndex', new THREE.BufferAttribute(skinIndex, 4));
   geo.setAttribute('skinWeight', new THREE.BufferAttribute(skinWeight, 4));
+  geo.setAttribute('aPartV', new THREE.BufferAttribute(partV, 1));
   geo.setIndex(indices);
   for (const g of groups) geo.addGroup(g.start, g.count, g.materialIndex);
   geo.computeBoundingSphere();

@@ -14,7 +14,7 @@
 
 import * as THREE from 'three';
 import { bakeSkinned } from './skin.js';
-import { skinMaterial, hairMaterial, clothMaterial, metalMaterial, eyeMaterial, glowMaterial, addOutline, setRigOcclusion } from './toon.js';
+import { skinMaterial, hairMaterial, clothMaterial, metalMaterial, eyeMaterial, glowMaterial, addOutline, setRigOcclusion, IRIS_LID_SHADE } from './toon.js';
 
 /* --------------------------------------------------------------- primitives -- */
 
@@ -710,7 +710,11 @@ export function buildHumanoid(def, opts = {}) {
   const matSecondary = clothMaterial(secondaryHex);
   const matAccent = glowMaterial(body.accent, 0.5);
   const matBoots = clothMaterial(body.boots ?? 0x2a2a34, { roughness: 0.6 });
-  const matEye = eyeMaterial(body.eye);
+  // The iris carries a lid shadow of its own (IRIS_LID_SHADE). Measured at portrait size, the iris
+  // owns ~9.5k px of a 700x700 frame and held *one value* — its median and its 95th percentile were
+  // 0.1 counts apart. Nothing in the scene can shade it: the lens is 4 mm tall, the sun's shadow map
+  // resolves 7.6 cm, and the lash bar above it is flat-shaded with no shadow of its own.
+  const matEye = eyeMaterial(body.eye, 0.10, { partShade: IRIS_LID_SHADE });
   const matMetal = metalMaterial(0xbfc6d4);
   // Capes, veils and wings are single-sided sheets, so they need DoubleSide —
   // otherwise the inverted-hull shell is all you see from the back.

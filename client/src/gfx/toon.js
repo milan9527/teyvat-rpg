@@ -51,11 +51,13 @@ uniform float uShadowFloor;
 uniform float uRampFloor;
 uniform float uFillStrength;
 uniform float uRigAo;
+uniform vec3  uPartShade;
 varying vec3 vToonNormal;
 varying vec3 vToonView;
 varying vec3 vToonWorld;
 varying float vRootUp;
 varying float vRigOcc;
+varying float vPartV;
 
 // Cheap 3D value noise, for surface detail no vertex attribute can carry: an
 // icosahedron boulder has a few hundred vertices over six metres, so anything finer
@@ -81,10 +83,12 @@ float toonVN(vec3 p) {
 // no baked occlusion must not be darkened by a stale uRigAo left on a shared material.
 const TOON_VERT_PARS = /* glsl */`
 attribute float aRigOcc;
+attribute float aPartV;
 `;
 
 const TOON_VERT = /* glsl */`
   vRigOcc = aRigOcc;
+  vPartV = aPartV;
   vToonNormal = normalize(mat3(modelMatrix) * objectNormal);
   vec4 toonWorld = modelMatrix * vec4(transformed, 1.0);
   #ifdef USE_INSTANCING
@@ -217,6 +221,27 @@ const TOON_FRAG = /* glsl */`
   // it, and that gradient is a property of the geometry, not of the light — so it can
   // be baked from the vertex's own height above the root and cost nothing.
   albedo *= mix(1.0 - uRootDark, 1.0, vRootUp);
+
+  // A two-tone up one part of a merged rig: the lid shadow across the top of an iris.
+  //
+  // Measured at a portrait (tools/iris-check.mjs --shade 0): the iris owned 9272-9689 px of a
+  // 700x700 frame — a shape as big as a thumbnail — and held **one value**. Its median and its
+  // 95th percentile were 0.1 counts apart, and its top third sat within 3.3 counts of its bottom
+  // third on all seven characters (lyra 195.4 / 199.3 / 198.7), on four of them with the sign
+  // *inverted*, i.e. brightest exactly where the lid hangs over it. A drawn eye is the other way
+  // round by a wide margin, because the lid and the lashes hang over it; that step is most of
+  // what makes an iris read as wet.
+  //
+  // It has to be a per-part quantity (aPartV, written in skin.js) rather than the object-space
+  // height above: in a merged character every face feature sits at y ~ 1.5 m and spans 5 cm.
+  // Two identities keep it safe on everything that is not an iris — uPartShade.x = 0 is off, and
+  // a geometry with no aPartV attribute reads 0, which puts every fragment on the unshaded side
+  // of the step. And it only ever multiplies *down*, so nothing here can reach the bloom
+  // threshold that the surface ceiling above exists to keep surfaces under.
+  if (uPartShade.x > 0.0) {
+    float pv = smoothstep(uPartShade.y - uPartShade.z, uPartShade.y + uPartShade.z, vPartV);
+    albedo *= mix(1.0, 1.0 - uPartShade.x, pv);
+  }
 
   // Surface mottling, in world space.
   //
@@ -553,6 +578,8 @@ export function toonMaterial(opts = {}) {
     sway = DEFAULTS.sway,
     rootDark = 0, rootH = 1, mottle = 0, mottleScale = 1.6, mottleSpeck = 1,
     shadowFloor = 0.14, rampFloor = 0, fill = 0, rigAo = 0,
+    // (depth, edge, softness) of the two-tone up a single part. depth 0 = off.
+    partShade = null,
     ...stdOpts
   } = opts;
 
@@ -596,6 +623,10 @@ export function toonMaterial(opts = {}) {
     // Off unless something baked an aRigOcc attribute for this geometry and said so; only
     // setRigOcclusion() turns it on. See the baked-occlusion block in TOON_FRAG.
     uRigAo: { value: rigAo },
+    // The lid shadow across an iris: how deep, where the step sits up the part, how soft.
+    // Zero depth is off, which is every material but the eye's. See the two-tone block in
+    // TOON_FRAG for why this is a per-part quantity and not the object-space height above.
+    uPartShade: { value: new THREE.Vector3(...(partShade || [0, 0.5, 0.1])) },
   };
 
   mat.onBeforeCompile = (shader) => {
@@ -884,8 +915,13 @@ export function metalMaterial(color, opts = {}) {
  * band came out the same value as its helm in the shade — the diffuse ramp had
  * taken 65 % of it. `enemies.js` asks for 0.42; a person's eye keeps the default,
  * because a face is lit like the skin next to it.
+ *
+ * `opts` is passed through to toonMaterial, which is how a *person's* iris gets its lid shadow
+ * (`partShade`, see IRIS_LID_SHADE) while a slime's eye orb and a herald's visor trim — the other
+ * two callers — keep the flat lens they should have: neither is under an eyelid, and a trim is not
+ * even an eye.
  */
-export function eyeMaterial(color, lit = 0.10) {
+export function eyeMaterial(color, lit = 0.10, opts = {}) {
   return toonMaterial({
     // Slightly deepened so the highlight pass has somewhere to go.
     color: new THREE.Color(color).multiplyScalar(0.78),
@@ -896,8 +932,20 @@ export function eyeMaterial(color, lit = 0.10) {
     specSharp: 0.95,
     rimStrength: 0.0,
     shadowTint: 0xb9c2e0,
+    ...opts,
   });
 }
+
+/**
+ * The lid shadow on a character's iris: (depth, where the step sits up the lens, softness).
+ *
+ * Depth is a straight multiply on albedo, so 0.42 is a little over half a stop and the shaded part
+ * keeps its hue — a black upper half reads as a hole, not as shade. The step sits above the middle
+ * because the lash bar already covers the very top of the lens, and the softness is a *sixth* of
+ * the lens rather than a fraction of a pixel: the eye already has a drawn line around it (the
+ * socket ring), and a second hard edge inside a 136-px shape would read as a second ring.
+ */
+export const IRIS_LID_SHADE = [0.42, 0.56, 0.16];
 
 /**
  * Hide / scale / chitin: monster bodies. Two bands rather than cloth's three and
