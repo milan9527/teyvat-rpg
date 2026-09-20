@@ -49,6 +49,7 @@ uniform float uMottleScale;
 uniform float uMottleSpeck;
 uniform float uShadowFloor;
 uniform float uRampFloor;
+uniform float uFormShade;
 uniform float uFillStrength;
 uniform float uRigAo;
 uniform vec3  uPartShade;
@@ -171,6 +172,26 @@ const TOON_FRAG = /* glsl */`
   float frac = fract(lit * bands);
   float smoothed = q + smoothstep(0.5 - uRampSoft, 0.5 + uRampSoft, frac) / bands;
   float ramp = clamp(smoothed, 0.0, 1.0);
+
+  // Form inside a cel band.
+  //
+  // A band is a plateau. bands = 3 puts the two edges at lit 1/3 and 2/3, which is 70 and 110
+  // degrees off the sun, so every facet on the sunlit side of a garment lands in one band and
+  // comes out at ramp = 1.0 whatever its normal was. On terrain and props that is the point;
+  // a garment is a closed round shape a metre tall, and it renders as a single value edge to
+  // edge. Measured at play distance (tools/cloth-form-check.mjs --form 0): 72 px of lyra's
+  // 165 px skirt row held 83.9..85.9, 108 px of ignar's 227 px jacket row held 18.5..21.8 —
+  // a third to a half of each garment's width as one number, with a step at the end of it.
+  // Not the geometry: the front-facing normals spread 0.72 of the lighting range (.run/ndl.mjs).
+  //
+  // So: keep the band edges, and lean the inside of each band on the continuous response
+  // that was quantised away. Multiplicative, anchored at lit = 1, so it is monotone in lit
+  // (no sawtooth at the band boundaries, which a frac-based version has), it never
+  // brightens — the surface ceiling and the bloom threshold above it are untouched — and a
+  // facet pointing straight at the sun keeps exactly the value it has today. It runs before
+  // both floors below, so uShadowFloor still caps the shadowed side and uRampFloor still
+  // means what it says for foliage.
+  ramp *= 1.0 - uFormShade * (1.0 - lit);
 
   // Shadow map attenuation folded into the ramp so cast shadows also read as cels.
   float shadowAtten = 1.0;
@@ -578,6 +599,9 @@ export function toonMaterial(opts = {}) {
     sway = DEFAULTS.sway,
     rootDark = 0, rootH = 1, mottle = 0, mottleScale = 1.6, mottleSpeck = 1,
     shadowFloor = 0.14, rampFloor = 0, fill = 0, rigAo = 0,
+    // How far the inside of each cel band leans on the continuous diffuse response. 0 = off,
+    // and off is bit-exact: the term is a multiply by 1.0 - 0 * anything.
+    formShade = 0,
     // (depth, edge, softness) of the two-tone up a single part. depth 0 = off.
     partShade = null,
     ...stdOpts
@@ -618,6 +642,7 @@ export function toonMaterial(opts = {}) {
     uMottleSpeck: { value: mottleSpeck },
     uShadowFloor: { value: shadowFloor },
     uRampFloor: { value: rampFloor },
+    uFormShade: { value: formShade },
     // Off for every material but the dungeon vaults; see the fill block in TOON_FRAG.
     uFillStrength: { value: fill },
     // Off unless something baked an aRigOcc attribute for this geometry and said so; only
@@ -856,10 +881,24 @@ export function skinMaterial(color) {
 }
 
 /** Cloth: 3 bands, matte. */
+/**
+ * How much form cloth gets inside its bands (see uFormShade in TOON_FRAG). Cloth and only cloth:
+ * a garment is the one class of toon surface here that is both large on screen and closed and
+ * round, so one band covers its whole sunlit side. Painted face details opt out again (see `flat`
+ * in gfx/humanoid.js) — they are deliberately 1-band and must stay one value.
+ *
+ * 0.55 buys 3.7 to 8.6 counts of relief inside the spans that used to hold one value, for 1.1 to
+ * 2.0 counts off the garment's 95th percentile (tools/cloth-form-check.mjs). It does not buy more
+ * than that because six of the seven rigs dress in near-black or near-white, where the display
+ * range has nothing left to shade with — that is a palette defect, and a separate unit.
+ */
+export const CLOTH_FORM = 0.55;
+
 export function clothMaterial(color, opts = {}) {
   return toonMaterial({
     color,
     bands: 3.0,
+    formShade: CLOTH_FORM,
     roughness: 0.88,
     specStep: 0.92,
     specSharp: 0.25,

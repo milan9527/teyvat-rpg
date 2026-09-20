@@ -723,8 +723,12 @@ export function buildHumanoid(def, opts = {}) {
   matSheetAccent.side = THREE.DoubleSide;
   // Face details. Flat-shaded (1 band, no rim) so they read as painted-on
   // features instead of picking up their own highlights and shadows.
+  // formShade is the other half of "flat": one band still leaves a continuous lean across the
+  // band, and a pupil or a blush that shades by its own normal is exactly the highlight this
+  // helper exists to suppress.
   const flat = (color, extra = {}) => clothMaterial(color, {
-    bands: 1.0, rimStrength: 0.0, specStep: 1.1, roughness: 0.95, shadowTint: 0xbfc4d8, ...extra,
+    bands: 1.0, rimStrength: 0.0, specStep: 1.1, roughness: 0.95, shadowTint: 0xbfc4d8,
+    formShade: 0, ...extra,
   });
   const matWhite = flat(0xfbf9ff);
   const matPupil = flat(0x1d1a26);

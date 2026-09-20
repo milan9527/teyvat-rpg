@@ -324,6 +324,15 @@ const SPEC = [
   // albedo driven by aPartV, the vertex's height up its *own part*. The rows that matter are the
   // ordering (the lens is brighter at the bottom) and the ratio that separates it from a dimmer.
   { name: 'iris-check', group: 'visual', needs: 'token', timeout: 15 * MIN, args: ['--out', `${runDir}/art-iris`] },
+  // At play distance a garment's widest row was one number over 34-49 % of its width — 72 px of
+  // lyra's skirt at 84 counts, 108 px of ignar's jacket at 21 — with a hard step at the end of it.
+  // Not the geometry (the front-facing normals spread 0.72 of the lighting range) and not the
+  // surface ceiling (measured: it touches one group of one of seven rigs, and preserves its spread
+  // there): bands = 3 puts both band edges outside the sunlit hemisphere, so a whole garment lands
+  // in one band at ramp 1.0. uFormShade leans the inside of each band on the continuous response.
+  // The rows that matter are measured inside the exact pixels that held one value, and the ordering
+  // is scored as a fraction of the relief so that a bigger dim cannot buy it.
+  { name: 'cloth-form-check', group: 'visual', needs: 'token', timeout: 15 * MIN, args: ['--out', `${runDir}/art-cloth-form`] },
 ];
 
 // A group name that is not in the default set is a probe that never runs: the row is written,
