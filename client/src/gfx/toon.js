@@ -50,10 +50,12 @@ uniform float uMottleSpeck;
 uniform float uShadowFloor;
 uniform float uRampFloor;
 uniform float uFillStrength;
+uniform float uRigAo;
 varying vec3 vToonNormal;
 varying vec3 vToonView;
 varying vec3 vToonWorld;
 varying float vRootUp;
+varying float vRigOcc;
 
 // Cheap 3D value noise, for surface detail no vertex attribute can carry: an
 // icosahedron boulder has a few hundred vertices over six metres, so anything finer
@@ -73,7 +75,16 @@ float toonVN(vec3 p) {
 }
 `;
 
+// TOON_PARS goes into both stages, and an `attribute` is a vertex-stage declaration, so the one
+// attribute this material reads directly needs its own prelude. A geometry without it reads 0 —
+// the identity for occlusion — which is why the *uniform* is what gates the effect: a mesh with
+// no baked occlusion must not be darkened by a stale uRigAo left on a shared material.
+const TOON_VERT_PARS = /* glsl */`
+attribute float aRigOcc;
+`;
+
 const TOON_VERT = /* glsl */`
+  vRigOcc = aRigOcc;
   vToonNormal = normalize(mat3(modelMatrix) * objectNormal);
   vec4 toonWorld = modelMatrix * vec4(transformed, 1.0);
   #ifdef USE_INSTANCING
@@ -350,6 +361,38 @@ const TOON_FRAG = /* glsl */`
     col *= min(1.0, uSurfaceCeil / max(surfLum, 1e-4));
   }
 
+  // --- baked occlusion, for the shadows the sun's map is too coarse to hold ---
+  // The sun's shadow camera is 156 m across a 2048 map, so one texel is 7.6 cm — a third of a
+  // character's head *diameter* — and normalBias is 4.5 cm, 0.39 of a head radius. Measured with
+  // the world hidden and only the character's own castShadow toggled, a head cast **0 px** of
+  // shadow on itself at five sun elevations from 16° to 55°, on a body covering 212k-265k px,
+  // while the same toggle over the terrain moves 43k px: the map works, it simply cannot see
+  // anything this small. What that costs is a face with 21 counts of luminance between p05 and
+  // p95 across a whole lit head and a *neck* reading 214 against a mid-face of 202 — brighter
+  // than the jaw hanging over it, which is the one thing it can never be.
+  //
+  // So the contact shadows are baked into the geometry (gfx/occlusion.js) and multiplied in here.
+  //
+  // *Here*, specifically: after the ceiling above, not before it with the other light terms where
+  // it belongs by meaning. The ceiling is a normalising clamp — anything above it comes out at
+  // exactly uSurfaceCeil — so two surfaces that differ only in occlusion land on the same number
+  // the moment both are bright, and skin in sunlight is bright. Measured with the multiply placed
+  // before it: a neck at occlusion 0.674 came out 4 counts darker than before and the cheek 2,
+  // leaving the neck *still brighter* than the jaw above it (210.1 vs 201.7). Moved after, the
+  // same term is the difference between a lit surface and an enclosed one. It cannot break what
+  // the ceiling promises, because occlusion only ever multiplies by less than one.
+  //
+  // It stays above the specular, the rim, the aura and totalEmissiveRadiance, because a highlight,
+  // a fresnel edge and a glowing weak point are not light arriving at the surface. Same argument,
+  // same shape, as terrain's own aoBake attribute and grass's uRootDark.
+  //
+  // uRigAo is the gate, not the attribute: a geometry with no aRigOcc reads 0 and is untouched
+  // anyway, but a *material* shared with an unbaked mesh must not carry a darkening it cannot
+  // justify, and a probe needs one number it can switch off within a single page.
+  if (uRigAo > 0.0) {
+    col *= 1.0 - uRigAo * clamp(vRigOcc, 0.0, 1.0);
+  }
+
   // --- stepped specular ------------------------------------------------------
   // A mix, not an add. The add was unbounded: a plate at the specular angle got the whole of
   // uSpecColor laid on top of its already-lit top band, and uSpecSharp 0.88 is an exponent of
@@ -509,7 +552,7 @@ export function toonMaterial(opts = {}) {
     surfaceCeil = DEFAULTS.surfaceCeil,
     sway = DEFAULTS.sway,
     rootDark = 0, rootH = 1, mottle = 0, mottleScale = 1.6, mottleSpeck = 1,
-    shadowFloor = 0.14, rampFloor = 0, fill = 0,
+    shadowFloor = 0.14, rampFloor = 0, fill = 0, rigAo = 0,
     ...stdOpts
   } = opts;
 
@@ -550,12 +593,15 @@ export function toonMaterial(opts = {}) {
     uRampFloor: { value: rampFloor },
     // Off for every material but the dungeon vaults; see the fill block in TOON_FRAG.
     uFillStrength: { value: fill },
+    // Off unless something baked an aRigOcc attribute for this geometry and said so; only
+    // setRigOcclusion() turns it on. See the baked-occlusion block in TOON_FRAG.
+    uRigAo: { value: rigAo },
   };
 
   mat.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, mat.userData.toon);
     shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', '#include <common>\n' + TOON_PARS)
+      .replace('#include <common>', '#include <common>\n' + TOON_VERT_PARS + TOON_PARS)
       .replace(
         '#include <project_vertex>',
         TOON_VERT + '\n' + SWAY_VERT + '\n#include <project_vertex>',
@@ -597,6 +643,25 @@ export function setAura(objOrMat, colorHex, strength, wash) {
     if (!o.material) return;
     (Array.isArray(o.material) ? o.material : [o.material]).forEach(apply);
   });
+}
+
+/**
+ * How much of the baked occlusion a rig's materials apply. 0.55 leaves an enclosed crevice at
+ * 45% of its lit value — the range a cel-shaded style can carry without the body reading as
+ * dirty, and about what the primary ramp's own darkest band costs, so a contact shadow and a
+ * cast shadow agree with each other instead of stacking into black.
+ */
+export const RIG_OCCLUSION = 0.55;
+
+/**
+ * Turn baked occlusion on for the materials of one rig. The obligation runs the other way too:
+ * only call this where a geometry actually has an `aRigOcc` attribute (bakeSkinned writes one),
+ * because these materials are per-rig but nothing in the type system says so.
+ */
+export function setRigOcclusion(materials, amount = RIG_OCCLUSION) {
+  for (const m of Array.isArray(materials) ? materials : [materials]) {
+    if (m?.userData?.toon?.uRigAo) m.userData.toon.uRigAo.value = amount;
+  }
 }
 
 export function setHitFlash(obj, v) {

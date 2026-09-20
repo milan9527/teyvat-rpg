@@ -310,6 +310,13 @@ const SPEC = [
   // silhouette and greyed the sky behind her. Every row is paired: nothing may glow, and the
   // ceiling that stops it may not dim the surface or stop an emissive from reaching past bloom.
   { name: 'surface-glow-check', group: 'visual', needs: 'token', timeout: 15 * MIN, args: ['--out', `${runDir}/art-surface-glow`] },
+  // The sun's shadow map is 156 m across 2048 texels — 7.6 cm a texel, a third of a head's
+  // diameter — so a character casts literally 0 px of shadow on itself (measured at five sun
+  // elevations) and a whole lit face held 21.9 counts of luminance end to end. The contact shading
+  // is baked per vertex instead (gfx/occlusion.js) and multiplied in behind uRigAo. Every row is
+  // paired: the field has to discriminate *and* order a body correctly, it has to reach the screen
+  // *and* only ever darken, and it has to shade crevices without dimming the character.
+  { name: 'rig-occlusion-check', group: 'visual', needs: 'token', timeout: 15 * MIN, args: ['--out', `${runDir}/art-rig-occlusion`] },
 ];
 
 // A group name that is not in the default set is a probe that never runs: the row is written,

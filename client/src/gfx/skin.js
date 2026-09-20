@@ -7,6 +7,7 @@
 // with a narrow blend into the child bone at the joint.
 
 import * as THREE from 'three';
+import { bakeOcclusion } from './occlusion.js';
 
 /**
  * Build a bone hierarchy from a `[name, parentName]` list and resolve its rest
@@ -52,7 +53,7 @@ export function makeRig(boneList, place) {
 // joint, 1 = the child joint). Keeping it late means only the last ~quarter of a
 // limb segment shares influence, so bends stay crisp instead of rubbery.
 const JOINT_BLEND_START = 0.72;
-export function bakeSkinned(parts, ordered, boneIndexOf, bindWorld) {
+export function bakeSkinned(parts, ordered, boneIndexOf, bindWorld, opts = {}) {
   // Collect materials in first-seen order, then walk the parts material by
   // material. One geometry group per material means one draw call per material
   // for the whole character instead of one per body part.
@@ -151,5 +152,20 @@ export function bakeSkinned(parts, ordered, boneIndexOf, bindWorld) {
   for (const g of groups) geo.addGroup(g.start, g.count, g.materialIndex);
   geo.computeBoundingSphere();
   geo.computeBoundingBox();
-  return { geo, materials };
+
+  // Occlusion, baked in bind space while the whole body is in one array and in its rest pose —
+  // which is the only pose it is ever whole in. The sun's shadow map cannot resolve anything on
+  // a body's own scale (one texel is a third of a head diameter), so a jaw shades no neck and a
+  // fringe shades no forehead unless it is baked; `occlusion.js` carries the measurements. The
+  // rest pose is a lie for a raised arm, but the parts that matter — the jaw over the neck, the
+  // hair over the scalp, a pauldron over a shoulder, the inside of a skirt — do not move
+  // relative to each other, and the alternative is nothing at all.
+  let occStats = null;
+  if (opts.occlusion !== false) {
+    const t0 = (typeof performance !== 'undefined' ? performance : Date).now();
+    const { occ, stats } = bakeOcclusion(position, normal, indices, opts.occlusion || {});
+    geo.setAttribute('aRigOcc', new THREE.BufferAttribute(occ, 1));
+    occStats = { ...stats, ms: Math.round((typeof performance !== 'undefined' ? performance : Date).now() - t0) };
+  }
+  return { geo, materials, occlusion: occStats };
 }

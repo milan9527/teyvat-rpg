@@ -14,7 +14,7 @@
 
 import * as THREE from 'three';
 import { bakeSkinned } from './skin.js';
-import { skinMaterial, hairMaterial, clothMaterial, metalMaterial, eyeMaterial, glowMaterial, addOutline } from './toon.js';
+import { skinMaterial, hairMaterial, clothMaterial, metalMaterial, eyeMaterial, glowMaterial, addOutline, setRigOcclusion } from './toon.js';
 
 /* --------------------------------------------------------------- primitives -- */
 
@@ -1068,7 +1068,11 @@ export function buildHumanoid(def, opts = {}) {
   parts.push(...buildHair(body.hair, P.headR, matHair, matBoots, matHairB));
 
   // --- bake ----------------------------------------------------------------
-  const { geo, materials } = bakeSkinned(parts, ordered, boneIndexOf, bindWorld);
+  const { geo, materials, occlusion } = bakeSkinned(parts, ordered, boneIndexOf, bindWorld);
+  // The bake wrote an aRigOcc attribute; this is the half that lets the shader read it. A jaw
+  // shading a neck and hair shading a scalp have to come from here, because the sun's shadow map
+  // is a terrain instrument and cannot resolve anything on a body's scale — see occlusion.js.
+  if (occlusion) setRigOcclusion(materials);
   const skinned = new THREE.SkinnedMesh(geo, materials);
   skinned.castShadow = true;
   skinned.receiveShadow = true;
@@ -1125,6 +1129,9 @@ export function buildHumanoid(def, opts = {}) {
       // mesh's material groups; tools/face-check.mjs is their consumer.
       matBrow, matEar,
     },
+    // What the occlusion bake did: grid size, ray count, cost in ms and the occlusion range it
+    // produced. A gate reads it to prove the attribute exists before it measures what it does.
+    occlusion,
     P, height: P.h,
   };
 }

@@ -1868,7 +1868,12 @@ function buildRigged(kind, def, M) {
   };
   K.parts(push, S, M, def, H);
 
-  const { geo, materials } = bakeSkinned(parts, ordered, boneIndexOf, bindWorld);
+  // No baked occlusion here yet, and the reason is the cost, not the look: every EnemyActor
+  // builds its own rig (actors.js constructs one per spawn, nothing is cached per type), and the
+  // bake measures ~50 ms on a 10k-vertex body — six hilichurls streaming in would be a third of
+  // a second of main thread for a gradient nobody has measured on a slime. Characters build once
+  // per login or swap, so they pay it; creatures get their own unit, after the cache.
+  const { geo, materials } = bakeSkinned(parts, ordered, boneIndexOf, bindWorld, { occlusion: false });
   const skinned = new THREE.SkinnedMesh(geo, materials);
   skinned.castShadow = true;
   skinned.receiveShadow = true;
