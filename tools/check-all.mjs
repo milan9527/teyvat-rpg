@@ -333,6 +333,16 @@ const SPEC = [
   // The rows that matter are measured inside the exact pixels that held one value, and the ordering
   // is scored as a fraction of the relief so that a bigger dim cannot buy it.
   { name: 'cloth-form-check', group: 'visual', needs: 'token', timeout: 15 * MIN, args: ['--out', `${runDir}/art-cloth-form`] },
+  // Eleven of the twenty-six surfaces painted below mid-grey rendered their entire form inside
+  // single digits of the 256 levels — nyx's boots held 1.4 counts across 8 658 px, ignar's jacket
+  // 2.6 across 22 239. Not the lighting (p75/p25 is the same 1.1-1.3 on dark and bright surfaces
+  // alike) and nothing downstream can reach it: the transfer chain returns ~5 counts for a given
+  // proportion at 200 and ~0.6 at 20. Only the paint can move, so `liftDark` maps every authored
+  // albedo below 128 onto [68, 128) in sRGB HSL, holding hue and saturation. The rows are paired in
+  // both directions: the dark half has to land in the band *and* hold its colour *and* show form in
+  // proportion, and every surface painted above the knee — seven skins, two pale hairs — has to
+  // come through byte-identical.
+  { name: 'garment-range-check', group: 'visual', needs: 'token', timeout: 15 * MIN, args: ['--out', `${runDir}/art-garment-range`] },
 ];
 
 // A group name that is not in the default set is a probe that never runs: the row is written,

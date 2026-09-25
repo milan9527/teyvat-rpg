@@ -174,6 +174,85 @@ const colDist = (a, b) => Math.hypot(
 );
 
 /**
+ * Where a character's darkest surfaces are allowed to be painted, in sRGB bytes.
+ *
+ * The defect, measured at play distance on all seven rigs (`tools/garment-range-check.mjs`, and the
+ * table it prints): eleven of the twenty-six surfaces below mid-grey render their *entire form*
+ * inside single digits of the 256 levels. nyx's boots hold 1.4 counts across 8 658 px; ignar's
+ * jacket — the largest single surface on the character, 22 239 px — holds 2.6; his trousers 4.9.
+ * At that width no shading model has anything to say: the cel ramp, the rim, the specular step and
+ * the form term from CLOTH_FORM all land inside one or two counts and the garment is a cardboard
+ * cut-out.
+ *
+ * It is not a lighting bug, and the ruler that says so is the ratio: the 75th percentile over the
+ * 25th is **1.18 on ignar's trousers and 1.27 on lyra's, 1.11 on skin** — the dark garments are lit
+ * exactly as well as the bright ones, in proportional terms. What they do not have is counts. The
+ * transfer chain is a curve, so the same proportion is worth ~5 counts at 200 and ~0.6 at 20, and
+ * the pipeline's toe makes it worse than plain sRGB would: an albedo of 216 renders at 0.95 of
+ * itself, one of 86 at 0.93, one of 43 at **0.72**.
+ *
+ * So the fix is where the paint sits, not how it is lit. An albedo below the knee has its luminance
+ * mapped onto [FLOOR, KNEE) affinely, which:
+ *
+ *   - is monotone and continuous at the knee, so no two colours swap order and nothing jumps;
+ *   - leaves every colour at or above mid-grey **byte-identical** (skins, pale hair, the near-white
+ *     jackets), so this cannot be blamed for anything in the upper half of the range;
+ *   - never darkens anything;
+ *   - pays for itself at the boundary between two garments rather than costing: the *albedo* gap
+ *     between ignar's trousers and his jacket has to shrink, but the curve hands more back than the
+ *     map takes, and the two go from 10 counts apart on screen to 38.
+ *
+ * FLOOR is read off a ladder rather than chosen: sweeping each failing surface's albedo through
+ * 55/65/80/95 (`.run/floor.mjs`), the interquartile spread crosses the 12-count bar at an albedo of
+ * 60..85 depending on the rig, and 68 with the knee at 128 puts every dark surface on every rig at
+ * 15..56 counts of rendered form. Below ~65 nothing is bought; far above it the costume stops
+ * reading as dark at all.
+ *
+ * The lift moves one thing — value — and holds the hue and the saturation the design chose, in
+ * sRGB HSL, the space the complaint is made in. That is *not* the same as scaling the colour in
+ * linear space, which was the first version and is the obvious one: multiplying every channel by
+ * one factor holds the chromaticity exactly, and still loses saturation where a player can see it.
+ * Measured over the shipped dark palettes it costs 0.03..0.10 of sRGB saturation — ignar's jacket
+ * #2a1a18 (0.27) arrives as #6e4a46 at 0.22, nyx's boots 0.32 → 0.23, pyra's 0.58 → 0.48 — which is
+ * the difference between leather and dust, because a desaturated dark hue at a higher value *is*
+ * dusty. Holding saturation instead lands that jacket on #754843, and costs one bisection.
+ *
+ * Going the other way was also tried and photographed, and it is the reason this paragraph names a
+ * direction: `s ** 0.65`, on the painter's argument that a dark brown is a saturated orange with the
+ * value taken out, put ignar in #cd392e trousers with a #8e4239 jacket and #984130 boots — a rig
+ * that reads as one flat postbox red, because a whole costume of near-blacks boosted together stops
+ * being four colours. Vividness is an authoring decision and belongs in `characters.js`; a repair
+ * function's job is to change as little as it can.
+ *
+ * **Apply this exactly once, at the palette boundary.** It is deliberately not idempotent — a
+ * second pass would lift 82 to 106 — and a map that were idempotent would have to be a hard clamp,
+ * which is the one thing this must not be: `max(lum, 68)` flattens a character's trousers, jacket
+ * and boots onto a single value and throws away the silhouette that `separateFrom` exists to keep.
+ * `garment-range-check` asserts the result lands inside [FLOOR, KNEE) for that reason, and that the
+ * saturation did not move.
+ */
+const DARK_KNEE = 128;
+const DARK_FLOOR = 68;
+const lumBytes = (hex) => 0.2126 * (hex >> 16 & 255) + 0.7152 * (hex >> 8 & 255) + 0.0722 * (hex & 255);
+
+function liftDark(colorHex) {
+  const lum = lumBytes(colorHex);
+  if (lum >= DARK_KNEE) return colorHex;                       // untouched, byte for byte
+  const want = DARK_FLOOR + lum * (DARK_KNEE - DARK_FLOOR) / DARK_KNEE;
+  const c = new THREE.Color(colorHex);
+  const hsl = c.getHSL({}, THREE.SRGBColorSpace);
+  // Bisect the lightness, holding hue and saturation. Luminance is monotone in L at fixed H and S,
+  // and the search starts at the authored L so the result can only be brighter; 24 halvings of at
+  // most [0, 1] land inside 1/256, i.e. on the same byte.
+  let lo = hsl.l, hi = 1;
+  for (let i = 0; i < 24; i++) {
+    const mid = (lo + hi) / 2;
+    if (lumBytes(c.setHSL(hsl.h, hsl.s, mid, THREE.SRGBColorSpace).getHex()) < want) lo = mid; else hi = mid;
+  }
+  return c.setHSL(hsl.h, hsl.s, (lo + hi) / 2, THREE.SRGBColorSpace).getHex();
+}
+
+/**
  * Push a garment colour away from the colours it touches.
  *
  * Nothing draws an outline *inside* a silhouette, so wherever two of a character's
@@ -197,6 +276,27 @@ const colDist = (a, b) => Math.hypot(
  * them all, references are dropped from the *end* of the list, which is why callers
  * pass skin first: a near-black cape on near-black hair (ignar) cannot be separated
  * by brightness at all, and the jacket/skin boundary is the larger one to lose.
+ *
+ * A garment the author painted dark stays dark: for a colour that came through `liftDark`, the
+ * search is boxed into that band, [DARK_FLOOR, DARK_KNEE), from both sides. Neither bound is
+ * decoration; each one was put there by a photograph.
+ *
+ * The floor first. The cheapest way to buy 60 bytes of distance from a mid-tone is to dive toward
+ * black, so the first run with the lift in place had this function undo it on exactly the two rigs
+ * whose hair and jacket are the same family: ignar's jacket came out at luminance 51 instead of 81
+ * and nyx's at 51 instead of 93, and both went straight back to rendering their whole form inside
+ * six counts. A boundary that has to fall back on hue is worse than one carried by value; a garment
+ * with no form at all is worse than either.
+ *
+ * Then the ceiling, for the same reason in the other direction. With only the floor, the second
+ * cheapest way to clear the hair is to climb, and the climb has no end: ignar's near-black leather
+ * jacket (#2a1a18, luminance 29) was lifted to 81 and then pushed by *this* function to 143 —
+ * #f37667, salmon — because his hair is the same brown and 60 bytes of distance are only for sale
+ * far up the range. gorran's went to 128. The band is where the costume the author drew lives, and
+ * a rule that exists to keep a collar legible may not repaint the coat to do it. Ignar's hair and
+ * jacket are 20 bytes apart as authored and no brightness-only rule can separate them; that pair
+ * stays in the unseparable list `tools/humanoid-check.mjs` prints, which is where it was before the
+ * lift existed, and it now at least has shading on both sides of the boundary.
  */
 function separateFrom(colorHex, refs) {
   const c = new THREE.Color(colorHex);
@@ -211,6 +311,9 @@ function separateFrom(colorHex, refs) {
     for (let i = 0; i <= 63; i++) {
       const s = 0.25 + i * 0.05;
       const hex = c.clone().multiplyScalar(s).getHex();
+      // Stay inside the band `liftDark` chose, if that is where this colour came from.
+      const lum = lumBytes(hex);
+      if (lumBytes(colorHex) < DARK_KNEE && (lum < DARK_FLOOR || lum >= DARK_KNEE)) continue;
       if (!clear(hex)) continue;
       const rank = [s < 1 ? 0 : 1, Math.abs(s - 1)];
       if (!best || rank[0] < best.rank[0]
@@ -230,6 +333,7 @@ function separateFrom(colorHex, refs) {
 // no hue difference to help it — only value.
 const SKIN_GAP = 48;
 const HAIR_GAP = 60;
+
 
 /**
  * A second, offset hair tone.
@@ -695,21 +799,31 @@ export function buildHumanoid(def, opts = {}) {
   const { bones, skeleton, ordered, bindWorld } = makeSkeleton(P);
   const boneIndexOf = (name) => ordered.indexOf(bones[name]);
 
+  // The dark end of the costume, lifted once, before anything reads a colour (see `liftDark`).
+  // Skin is not in here: every authored skin tone is 150..224 already, and a face is the one surface
+  // on the body whose value the player reads as a *person* rather than as a material.
+  const hairHex = liftDark(body.hairColor);
+  const bootsHex = liftDark(body.boots ?? 0x2a2a34);
   const matSkin = skinMaterial(body.skin);
-  const matHair = hairMaterial(body.hairColor, body.hairTip);
-  const matHairB = hairMaterial(hairTone(body.hairColor), body.hairTip);
+  const matHair = hairMaterial(hairHex, body.hairTip);
+  // hairTone after the lift, not before: its near-black branch exists because of this same defect
+  // ("the cel ramp has almost no range left to work in"), so it should be deciding about the colour
+  // that will actually be rendered. Two of the seven rigs cross its threshold and get a *darker*
+  // second tone now, which is what its own comment asks for once the hair is no longer near-black.
+  const matHairB = hairMaterial(hairTone(hairHex), body.hairTip);
   // The primary colour is the trousers, the skirt and the trims; with a skirt on, the
   // thighs and shins under it are bare skin, and the cuffs sit on bare forearms.
-  const primaryHex = separateFrom(body.primary, [[body.skin, SKIN_GAP]]);
+  const primaryHex = separateFrom(liftDark(body.primary), [[body.skin, SKIN_GAP]]);
   const matPrimary = clothMaterial(primaryHex);
   // The secondary colour is the jacket and both sleeves. It touches skin at the collar
   // and at both elbows, and on the pale-haired designs it is *also* near-white, so the
   // head merges into the shoulders and the character reads as headless from behind.
   // Skin first: see `separateFrom` on which reference gets dropped when they conflict.
-  const secondaryHex = separateFrom(body.secondary, [[body.skin, SKIN_GAP], [body.hairColor, HAIR_GAP]]);
+  // The hair reference is the *lifted* hair, since that is what the jacket will be seen against.
+  const secondaryHex = separateFrom(liftDark(body.secondary), [[body.skin, SKIN_GAP], [hairHex, HAIR_GAP]]);
   const matSecondary = clothMaterial(secondaryHex);
   const matAccent = glowMaterial(body.accent, 0.5);
-  const matBoots = clothMaterial(body.boots ?? 0x2a2a34, { roughness: 0.6 });
+  const matBoots = clothMaterial(bootsHex, { roughness: 0.6 });
   // The iris carries a lid shadow of its own (IRIS_LID_SHADE). Measured at portrait size, the iris
   // owns ~9.5k px of a 700x700 frame and held *one value* — its median and its 95th percentile were
   // 0.1 counts apart. Nothing in the scene can shade it: the lens is 4 mm tall, the sun's shadow map
@@ -735,7 +849,10 @@ export function buildHumanoid(def, opts = {}) {
   const matMouth = flat(new THREE.Color(body.skin).lerp(new THREE.Color(0x8d3a42), 0.62).getHex());
   const matBlush = flat(new THREE.Color(body.skin).lerp(new THREE.Color(0xff8f97), 0.45).getHex());
   // Brows are a shade darker than the hair so they stay visible under the fringe.
-  const matBrow = flat(new THREE.Color(body.hairColor).multiplyScalar(0.45).getHex());
+  // Off the lifted hair, so "a shade darker" stays the authored relationship rather than becoming
+  // 4.8x darker on the near-black heads. A brow is a `flat()` line with no form to render, so the
+  // floor deliberately does not apply to it — same population as the pupil and the lash bar.
+  const matBrow = flat(new THREE.Color(hairHex).multiplyScalar(0.45).getHex());
   const matNose = flat(new THREE.Color(body.skin).multiplyScalar(0.80).getHex());
   // The ear gets its own tone, a touch cooler than the cheek. That also gives face-check a
   // handle on it: inside one merged skin material an ear is indistinguishable from the skull.
