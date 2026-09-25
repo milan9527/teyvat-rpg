@@ -921,6 +921,23 @@ await p.evaluate(async () => {
     };
   };
   window.__mcHide = (on) => { window.__mc.group.visible = !on; for (let i = 0; i < 3; i++) window.game.r.render(0.016); };
+  // Every weapon slot the rig has, hidden or restored as one. Since weapons hang on the back when
+  // nobody is fighting, walk and climb carry a sheathed sword whose tip clears the shoulder, and a
+  // claim about where the *limbs* go has to be measured without it.
+  // A render call is not a presented frame at 2 fps, so this waits for two of them before it
+  // lets the screenshot happen: the first stowed climb came back 19803 px against the 19809 of
+  // the frame before it, sword and all.
+  window.__mcStow = async (on) => {
+    const r = window.__mc.rig;
+    const slots = [r.weaponSlot, r.offhandSlot, r.backSlot, r.hipSlot].filter(Boolean);
+    let hidden = 0;
+    for (const sl of slots) for (const c of sl.children) { c.visible = !on; hidden++; }
+    for (let i = 0; i < 2; i++) {
+      window.game.r.render(0.016);
+      await new Promise((res) => requestAnimationFrame(() => res()));
+    }
+    return hidden;
+  };
 });
 const info = await p.evaluate(() => ({
   zone: window.game.zoneId, quality: window.game.quality, frame: window.__mc.frame,
@@ -1032,6 +1049,19 @@ for (const name of clipNames) {
   }
 }
 
+// Climb and walk once more with every weapon slot hidden, for the one claim that is about limbs.
+const limbs = new Map();
+for (const name of ['walk', 'climb', 'fall']) {
+  if (!shots.has(name)) continue;
+  await p.evaluate(([n, d, c]) => window.__mcPose(n, d, c), [name, DRIVE[name], meta(name)]);
+  const hidden = await p.evaluate(() => window.__mcStow(true));
+  await sleep(700);
+  const m = largestBlob(diffMask(await shoot(`${outDir}/${name}-stowed.png`), bg1, 8));
+  await p.evaluate(() => window.__mcStow(false));
+  limbs.set(name, { box: m.box || { x: 0, y: 0, w: 0, h: 0 }, hidden });
+  console.log(`  ${(name + '/nowpn').padEnd(9)} ${String(m.count).padStart(6)}px  box ${m.box?.w}x${m.box?.h}  (${hidden} weapon parts hidden)`);
+}
+
 // The control: idle, posed and shot a second time. If this does not come back as the same
 // silhouette, none of the comparisons below mean anything.
 const st2 = await p.evaluate(([n, d, c]) => window.__mcPose(n, d, c), ['idle', DRIVE.idle, meta('idle')]);
@@ -1119,9 +1149,23 @@ if (S('idle') && S('climb')) {
   check('climb reaches above where standing puts the head',
     B('climb').y < B('idle').y - 40 && B('climb').h > B('idle').h,
     `top ${B('climb').y} vs idle ${B('idle').y}, height ${B('climb').h} vs ${B('idle').h}`);
-  check('and hugs the face instead of swinging its limbs out',
-    aspect(S('climb')) < 0.55 && (S('walk') ? aspect(S('climb')) < aspect(S('walk')) : true),
-    `aspect ${aspect(S('climb')).toFixed(2)} vs walk ${S('walk') ? aspect(S('walk')).toFixed(2) : 'n/a'}`);
+  // Limbs, so measured on the limbs: the sheathed sword on the back is not one of them, and with
+  // it in the silhouette climb read 0.45 against walk's 0.41 — the blade's tip, not an arm.
+  //
+  // The comparison is against fall, not walk. Weapon-free, climb and walk both read 0.33: the
+  // "narrower than a walk" half only ever passed because walk used to swing a sword in its hand.
+  // What the row exists to reject is the clip not playing — `climbing` pinned false drops the body
+  // into fall, arms and legs spread — so fall is the control, and walk is printed for the record.
+  const L = limbs.get('climb'), Lf = limbs.get('fall'), Lw = limbs.get('walk');
+  if (L && Lf) {
+    check('stowing the weapon took it out of the climb silhouette',
+      L.hidden > 0 && L.box.w < S('climb').w,
+      `${L.hidden} weapon parts hidden, width ${S('climb').w} -> ${L.box.w}`);
+    check('and hugs the face instead of spreading its limbs like a fall',
+      aspect(L.box) < 0.55 && aspect(L.box) < aspect(Lf.box),
+      `aspect without the weapon ${aspect(L.box).toFixed(2)} vs fall ${aspect(Lf.box).toFixed(2)}`
+      + ` (walk ${Lw ? aspect(Lw.box).toFixed(2) : 'n/a'}; with the weapon ${aspect(S('climb')).toFixed(2)})`);
+  } else skipped('climb limbs', 'no weapon-free silhouette of climb and fall');
 } else skipped('climb geometry', 'no silhouette');
 
 /* ------------------------------------------------------------------- tally -- */

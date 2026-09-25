@@ -39,6 +39,8 @@
 import fs from 'node:fs';
 import puppeteer from 'puppeteer';
 import { decodePng, rectStats, pixelsDiffering } from './lib/png.mjs';
+import { zoneById, zoneEntryRank } from '../shared/src/data/zones.js';
+import { raiseRank } from './lib/account.mjs';
 
 const argv = process.argv.slice(2);
 const outDir = (() => { const i = argv.indexOf('--out'); return i >= 0 ? argv[i + 1] : '/tmp/npccam'; })();
@@ -66,6 +68,11 @@ const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
 // smith read as bare-chested in the screenshot; the guard puts them at 46 and up.
 const MIN_GAP = 42;
 
+// How far switching the non-albedo light terms off has to move the graded forearm, in counts,
+// for the fidelity row to be reading a frame where they were actually off. Measured 27-42 on
+// the four mondstadt villagers; a frame the toggle never reached reads 0.
+const AO_MOVE = 10;
+
 const tokFile = '/tmp/world-token.txt';
 let token = fs.existsSync(tokFile) ? fs.readFileSync(tokFile, 'utf8').trim() : '';
 if (!token) {
@@ -74,6 +81,16 @@ if (!token) {
   });
   token = (await r.json()).token;
   fs.writeFileSync(tokFile, token);
+}
+
+// Rank first, browser second: `Game.load` fetches the save once and every zone gate reads that
+// copy, and `enterZone` answers a refusal with a toast. The liyue half of this probe sat behind
+// that toast on a fresh AR 1 token, photographing mondstadt's villagers under liyue's name.
+const API = process.env.GAME_API || 'http://127.0.0.1:8787';
+const needRank = Math.max(...zones.map((z) => zoneEntryRank(zoneById(z)) || 1));
+if (needRank > 1) {
+  const rr = await raiseRank(API, token, needRank);
+  console.log(`rank -> AR ${rr.rank ?? '?'} (${zones.join(', ')} need ${needRank})${rr.ok ? '' : ` — ${rr.reason}`}`);
 }
 
 const b = await puppeteer.launch({
@@ -142,25 +159,35 @@ const rows = [], skipped = [];
 for (const zone of zones) {
   const setup = await p.evaluate(async (z) => {
     const g = window.game;
+    const toasts = [];
+    const offToast = g.on?.('toast', (t) => toasts.push(t?.text ?? String(t)));
     await g.enterZone(z, { x: 0, z: 0 });
     await new Promise((r) => setTimeout(r, 6000));
+    offToast?.();
     const a = g.me?.actor;
     const root = [a?.root, a?.group, a?.mesh, a?.obj].find((o) => o && o.isObject3D);
     if (root) root.visible = false;
     g.stop();
     return {
+      zone: g.player?.zone, toasts,
       avatarHidden: !!root,
       npcs: g.world.npcs.map((n) => ({ id: n.id, x: n.x, y: n.y, z: n.z })),
     };
   }, zone);
   console.log(`\n== ${zone}: ${setup.npcs.length} villagers ==`);
+  // enterZone reports a refusal as a toast and resolves anyway, so without this row a zone the
+  // server turned down photographs the previous zone's villagers under the new zone's name.
+  if (!check(`${zone}: the world is in the zone it was asked for`, setup.zone === zone,
+    `in ${setup.zone}${setup.toasts.length ? ` · ${JSON.stringify(setup.toasts)}` : ''}`)) continue;
   check(`${zone}: the avatar is hidden`, setup.avatarHidden);
 
   for (let i = 0; i < setup.npcs.length; i++) {
     // Frame the villager, then take three shots of the same frame: as built, with this
     // villager's jacket forced to magenta, and with their skin forced to magenta.
+    // A fourth shot, `bare`, is the as-built frame with this villager's cloth-only and
+    // enclosure-only light terms switched off; see the fidelity row below for why it exists.
     const shots = [];
-    for (const tint of ['none', 'jacket', 'skin']) {
+    for (const tint of ['none', 'jacket', 'skin', 'bare']) {
       const info = await p.evaluate(([i, tint, W, H]) => {
         const g = window.game;
         const n = g.world.npcs[i];
@@ -201,8 +228,15 @@ for (const zone of zones) {
         const suspect = tint === 'jacket' ? mat : tint === 'skin' ? skinMat : null;
         const was = suspect?.color.getHex();
         if (suspect) suspect.color.setHex(0xff00ff);
+        const terms = tint === 'bare'
+          ? Object.values(n.rig.materials).flatMap((m) => [m?.userData?.toon?.uRigAo, m?.userData?.toon?.uFormShade])
+            .filter(Boolean)
+          : [];
+        const termsWas = terms.map((u) => u.value);
+        terms.forEach((u) => { u.value = 0; });
         for (let k = 0; k < 3; k++) g.r.render(0.016);
         if (suspect) suspect.color.setHex(was);
+        terms.forEach((u, k) => { u.value = termsWas[k]; });
 
         // Rects, in pixels, from the projected bones. Scale comes from projecting a 10 cm
         // vertical offset at the same depth rather than from a trig identity, so it stays
@@ -223,6 +257,7 @@ for (const zone of zones) {
         };
         return {
           id: n.id, shirt: shirtHex, skin: skinHex, ppm: +ppm.toFixed(1),
+          termsOn: termsWas.filter((v) => v > 0).length,
           // Chest: reported, not asserted. The jacket band runs waist→shoulders, so a rect
           // a little below the chest bone is deep inside it and clear of the collar — but
           // the only skin near it is the face, whose surfaces point every which way, so a
@@ -247,7 +282,7 @@ for (const zone of zones) {
         })),
       });
     }
-    const [s, jm, sm] = shots;
+    const [s, jm, sm, na] = shots;
     // Which arm to grade: the one whose two controls are both strongest. Tinting the
     // jacket must move that arm's sleeve rect and leave its forearm rect alone, and
     // tinting the skin must do the exact opposite. Picking by `min` of the two means an
@@ -293,10 +328,26 @@ for (const zone of zones) {
     const enc = (v) => Math.round(255 * (v <= 0.0031308 ? v * 12.92 : 1.055 * v ** (1 / 2.4) - 0.055));
     const skinRgb = [0, 1, 2].map((k) => parseInt(s.skin.slice(k * 2, k * 2 + 2), 16));
     const shirtRgb = [0, 1, 2].map((k) => parseInt(s.shirt.slice(k * 2, k * 2 + 2), 16));
-    const recovered = [0, 1, 2].map((k) => Math.max(0, Math.min(255,
-      enc(lin(skinRgb[k]) * lin(arm.sleeve.rgb[k]) / Math.max(lin(arm.fore.rgb[k]), 1e-4)))));
+    const recover = (sleeve, fore) => [0, 1, 2].map((k) => Math.max(0, Math.min(255,
+      enc(lin(skinRgb[k]) * lin(sleeve[k]) / Math.max(lin(fore[k]), 1e-4)))));
+    const recovered = recover(arm.sleeve.rgb, arm.fore.rgb);
     const gap = Math.round(dist(recovered, skinRgb));
-    const fidelity = Math.round(dist(recovered, shirtRgb));
+    // Except for two light terms the cylinders do *not* share. The baked contact shadow
+    // (uRigAo, gfx/occlusion.js, bound in the rest pose) encloses a forearm hanging beside the
+    // hip far more than the sleeve above it, and CLOTH_FORM (uFormShade) leans cloth, and only
+    // cloth, darker inside its band. With both on the ratio handed back a shirt 29-59 bytes
+    // too bright and too blue; with only the occlusion off, 24-35 bytes too dark. "Does the
+    // material reach the screen" is a question about the colour pipeline, so it reads the
+    // `bare` frame; "does the shirt read as skin" is a question about what the player sees, so
+    // `gap` above keeps the as-built frame, every term on.
+    const k = s.armS.findIndex((a) => a.s === arm.s);
+    const bare = na.armS[k];
+    const recoveredBare = recover(bare.sleeve.rgb, bare.fore.rgb);
+    const fidelity = Math.round(dist(recoveredBare, shirtRgb));
+    const aoMoved = chan(arm.fore.rgb, bare.fore.rgb);
+    check(`${zone}/${s.id}: the non-albedo terms were on, and switching them off reached the arm`,
+      na.termsOn > 0 && aoMoved >= AO_MOVE,
+      `${na.termsOn} light terms were on, forearm moved ${aoMoved} (need ${AO_MOVE})`);
     const dArm = chan(arm.sleeve.rgb, arm.fore.rgb);
     const dChest = chan(s.chestS.rgb, arm.fore.rgb);
     // Contrast-to-noise: an albedo step is only an edge if it beats the shading variation
@@ -309,6 +360,7 @@ for (const zone of zones) {
       + `  sleeve ${JSON.stringify(arm.sleeve.rgb)} std ${arm.sleeve.std}`
       + `  fore ${JSON.stringify(arm.fore.rgb)} std ${arm.fore.std}`
       + `  ->  shirt recovered #${recovered.map((v) => v.toString(16).padStart(2, '0')).join('')}`
+      + `, bare #${recoveredBare.map((v) => v.toString(16).padStart(2, '0')).join('')}`
       + ` (off by ${fidelity}), gap ${gap}, raw ${dArm} (cnr ${cnr}), chest-vs-skin ${dChest}`);
 
     check(`${zone}/${s.id}: the screen agrees with the material`, fidelity <= 25,
